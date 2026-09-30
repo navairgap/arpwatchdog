@@ -26,3 +26,6 @@ Companion to SentinelWiFi's rogue-DHCP check; same ethics.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+---
+maintained · verified 2026-09-30
