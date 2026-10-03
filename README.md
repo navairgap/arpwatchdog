@@ -33,3 +33,7 @@ maintained · verified 2026-09-30
 maintained · verified 2026-10-01
 ---
 maintained · verified 2026-10-02
+
+## Alert channels
+
+Alerts print to stdout by default. Set `WATCHDOG_NOTIFY=webhook:https://…` to POST new-device events as JSON, or `WATCHDOG_NOTIFY=syslog` to route through the system logger. Multiple channels are comma-separated.
