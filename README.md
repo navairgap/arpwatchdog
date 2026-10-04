@@ -37,3 +37,21 @@ maintained · verified 2026-10-02
 ## Alert channels
 
 Alerts print to stdout by default. Set `WATCHDOG_NOTIFY=webhook:https://…` to POST new-device events as JSON, or `WATCHDOG_NOTIFY=syslog` to route through the system logger. Multiple channels are comma-separated.
+
+## systemd
+
+```ini
+[Unit]
+Description=arpwatchdog
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/arpwatchdog
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Passive capture needs `CAP_NET_RAW` — prefer that over running as root: `setcap cap_net_raw+ep`.
