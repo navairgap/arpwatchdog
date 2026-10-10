@@ -55,3 +55,13 @@ WantedBy=multi-user.target
 ```
 
 Passive capture needs `CAP_NET_RAW` — prefer that over running as root: `setcap cap_net_raw+ep`.
+
+## Uninstalling
+
+```bash
+systemctl disable --now arpwatchdog
+rm /etc/systemd/system/arpwatchdog.service
+setcap -r /usr/local/bin/arpwatchdog 2>/dev/null; rm /usr/local/bin/arpwatchdog
+```
+
+the state file in `/var/lib/arpwatchdog/` can go too — it only holds known devices.
