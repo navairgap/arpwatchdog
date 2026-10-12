@@ -75,3 +75,7 @@ setcap -r /usr/local/bin/arpwatchdog 2>/dev/null; rm /usr/local/bin/arpwatchdog
 ```
 
 the state file in `/var/lib/arpwatchdog/` can go too — it only holds known devices.
+
+## Alert examples
+
+`[NEW DEVICE] 6a:3f:.. joined on eth0` · `[MAC CHANGED] 192.168.1.20 was aa:.. now 7c:..` · `[FLAP] 192.168.1.44 changed 5 times in 60s`
