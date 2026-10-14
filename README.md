@@ -79,3 +79,7 @@ the state file in `/var/lib/arpwatchdog/` can go too — it only holds known dev
 ## Alert examples
 
 `[NEW DEVICE] 6a:3f:.. joined on eth0` · `[MAC CHANGED] 192.168.1.20 was aa:.. now 7c:..` · `[FLAP] 192.168.1.44 changed 5 times in 60s`
+
+## Tuning
+
+flap detection fires at 5 MAC changes in 60 seconds by default; busy DHCP networks want 10-in-120. the new-device alert has no cooldown — if that floods you, the answer is an allowlist of known devices, not a longer cooldown.
