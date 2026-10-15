@@ -83,3 +83,7 @@ the state file in `/var/lib/arpwatchdog/` can go too — it only holds known dev
 ## Tuning
 
 flap detection fires at 5 MAC changes in 60 seconds by default; busy DHCP networks want 10-in-120. the new-device alert has no cooldown — if that floods you, the answer is an allowlist of known devices, not a longer cooldown.
+
+## Design goals
+
+passive means passive: the tool never sends a packet. what it can't learn by listening, it doesn't learn — the day it needs to ask, it becomes a different tool.
