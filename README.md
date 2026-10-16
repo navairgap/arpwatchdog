@@ -87,3 +87,7 @@ flap detection fires at 5 MAC changes in 60 seconds by default; busy DHCP networ
 ## Design goals
 
 passive means passive: the tool never sends a packet. what it can't learn by listening, it doesn't learn — the day it needs to ask, it becomes a different tool.
+
+## Support
+
+attach `arpwatchdog --dump-state` and the interface list with MAC ages; most 'it missed a device' reports turn out to be sleep-mode laptops.
