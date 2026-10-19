@@ -1,93 +1,37 @@
 # arpwatchdog
 
-Standalone ARP-spoofing detector with instant desktop alerts
+A planned passive monitor for unexpected ARP and gateway-MAC changes on a local network.
 
-> 🚧 **Status: planning** — architecture and README first, code next.
+> **Status: design stage.** This repository currently contains documentation only; packet capture and alerting are not implemented yet.
 
-## Why
+## Goal
 
-ARP spoofing is the classic LAN attack: someone claims your gateway's MAC and reads all your traffic. Arpwatchdog watches the ARP table for duplicate or changing gateway MACs and screams the moment something looks wrong.
+Help an administrator notice suspicious local-network changes, such as a gateway MAC address changing unexpectedly or conflicting IP-to-MAC observations.
 
-## Planned features
+## Intended behavior
 
-- Track gateway MAC over time; alert on any change
-- Detect duplicate IP-MAC claims on the LAN
-- Passive listening mode — never sends a single packet
-- One-command install + systemd service
+- Observe ARP traffic on an interface selected by the operator.
+- Maintain a small local history of IP/MAC observations.
+- Compare gateway observations with a configured or learned baseline.
+- Report changes with timestamps and enough context to investigate.
+- Offer stdout output first; other alert channels can follow once the event format stabilizes.
 
-## Stack
+## Safety and limitations
 
-`python` `scapy` `linux`
+- Passive capture must not generate ARP probes or modify network configuration.
+- Packet capture requires appropriate permissions; prefer the narrowest capability supported by the platform instead of running the whole program as root.
+- A MAC change is a signal to investigate, not proof of an attack. DHCP renewals, failover, virtualization, and legitimate hardware changes can produce similar events.
+- Do not collect or transmit unrelated packet payloads.
+- Test only on networks you own or are authorized to monitor.
 
-## Notes
+## Planned milestones
 
-Companion to SentinelWiFi's rogue-DHCP check; same ethics.
+- [ ] Specify the event schema and baseline format.
+- [ ] Add parser tests from synthetic ARP fixtures.
+- [ ] Implement passive capture behind an interface that can be mocked.
+- [ ] Add duplicate-claim and gateway-change detection.
+- [ ] Document permissions, exclusions, and alert tuning.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
-
----
-maintained · verified 2026-09-30
----
-maintained · verified 2026-10-01
----
-maintained · verified 2026-10-02
-
-## Alert channels
-
-Alerts print to stdout by default. Set `WATCHDOG_NOTIFY=webhook:https://…` to POST new-device events as JSON, or `WATCHDOG_NOTIFY=syslog` to route through the system logger. Multiple channels are comma-separated.
-
-## systemd
-
-```ini
-[Unit]
-Description=arpwatchdog
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/arpwatchdog
-Restart=on-failure
-User=root
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Passive capture needs `CAP_NET_RAW` — prefer that over running as root: `setcap cap_net_raw+ep`.
-
-## Uninstalling
-
-```bash
-systemctl disable --now arpwatchdog
-rm /etc/systemd/system/arpwatchdog.service
-setcap -r /usr/local/bin/arpwatchdog 2>/dev/null; rm /usr/local/bin/arpwatchdog
-```
-
-the state file in `/var/lib/arpwatchdog/` can go too — it only holds known devices.
-
-## Uninstalling
-
-```bash
-systemctl disable --now arpwatchdog
-rm /etc/systemd/system/arpwatchdog.service
-setcap -r /usr/local/bin/arpwatchdog 2>/dev/null; rm /usr/local/bin/arpwatchdog
-```
-
-the state file in `/var/lib/arpwatchdog/` can go too — it only holds known devices.
-
-## Alert examples
-
-`[NEW DEVICE] 6a:3f:.. joined on eth0` · `[MAC CHANGED] 192.168.1.20 was aa:.. now 7c:..` · `[FLAP] 192.168.1.44 changed 5 times in 60s`
-
-## Tuning
-
-flap detection fires at 5 MAC changes in 60 seconds by default; busy DHCP networks want 10-in-120. the new-device alert has no cooldown — if that floods you, the answer is an allowlist of known devices, not a longer cooldown.
-
-## Design goals
-
-passive means passive: the tool never sends a packet. what it can't learn by listening, it doesn't learn — the day it needs to ask, it becomes a different tool.
-
-## Support
-
-attach `arpwatchdog --dump-state` and the interface list with MAC ages; most 'it missed a device' reports turn out to be sleep-mode laptops.
+MIT. See [LICENSE](LICENSE).
