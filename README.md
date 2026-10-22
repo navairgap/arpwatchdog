@@ -35,3 +35,8 @@ Help an administrator notice suspicious local-network changes, such as a gateway
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+
+## Interpreting observations
+
+A changed IP-to-MAC mapping is a signal to investigate, not proof of spoofing. Preserve timestamps and interface context, account for router failover and virtual machines, and keep monitoring passive without sending ARP probes.
