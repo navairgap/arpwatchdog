@@ -40,3 +40,8 @@ MIT. See [LICENSE](LICENSE).
 ## Interpreting observations
 
 A changed IP-to-MAC mapping is a signal to investigate, not proof of spoofing. Preserve timestamps and interface context, account for router failover and virtual machines, and keep monitoring passive without sending ARP probes.
+
+
+## Maintenance and verification notes
+
+Add triage notes explaining that an IP-to-MAC change is a signal, not proof of spoofing; retain interface and timestamp context and keep monitoring passive.
