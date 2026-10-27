@@ -27,6 +27,13 @@ This schema is a proposed boundary between passive packet capture, detection rul
 - Never include unrelated packet payloads or credentials in events.
 - Malformed packets should produce a bounded diagnostic counter; they must not crash the capture loop.
 
+## Repeated observations and validation
+
+- Validate IPv4 fields as addresses and MAC fields as exactly six hexadecimal octets before emitting an event.
+- Canonicalize MAC casing before deduplication, so `aa:bb:cc:dd:ee:ff` and `AA:BB:CC:DD:EE:FF` are not treated as different devices.
+- Repeated packets are separate observations, not automatically separate alerts. Detection rules should track first-seen and last-seen times and apply a documented aggregation window.
+- The observation interface is part of event context: the same sender seen on different interfaces must not be merged without an explicit policy.
+
 ## Detection guidance
 
 A MAC change is an observation, not a verdict. Detection output should include the baseline and new values, first/last seen times, and the rule that triggered. DHCP, failover, virtualization, and legitimate device replacement can cause changes.
