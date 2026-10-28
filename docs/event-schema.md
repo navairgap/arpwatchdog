@@ -38,6 +38,10 @@ This schema is a proposed boundary between passive packet capture, detection rul
 
 A MAC change is an observation, not a verdict. Detection output should include the baseline and new values, first/last seen times, and the rule that triggered. DHCP, failover, virtualization, and legitimate device replacement can cause changes.
 
+## Baseline lifecycle
+
+A learned IP-to-MAC mapping should have an explicit observation window and last-seen timestamp. Expired entries should become unknown rather than remain trusted indefinitely. A new mapping should be compared against a stable, recently observed baseline; do not alert on a single packet during startup without enough context to distinguish an incomplete learning period from a change. Keep the baseline local and make any manual trust override explicit and auditable.
+
 ## Tests
 
 Use synthetic packet fixtures to cover truncated headers, invalid address lengths, duplicate observations, MAC normalization, and gateway changes. Unit tests must not require root privileges or a live interface.
