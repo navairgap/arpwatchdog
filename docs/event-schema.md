@@ -45,3 +45,7 @@ A learned IP-to-MAC mapping should have an explicit observation window and last-
 ## Tests
 
 Use synthetic packet fixtures to cover truncated headers, invalid address lengths, duplicate observations, MAC normalization, and gateway changes. Unit tests must not require root privileges or a live interface.
+
+## Event identity and ordering
+
+If events are persisted or exported, assign a stable local event identifier and retain the capture sequence separately from wall-clock time. Timestamps can collide or move backward when a system clock is adjusted; use the sequence number to preserve observation order within one capture session. Do not use the sender IP/MAC pair as a unique event ID because repeated observations are meaningful evidence. On export, preserve the capture-session identifier so events from separate interfaces or sessions are not accidentally merged.
