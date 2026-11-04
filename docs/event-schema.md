@@ -49,3 +49,10 @@ Use synthetic packet fixtures to cover truncated headers, invalid address length
 ## Event identity and ordering
 
 If events are persisted or exported, assign a stable local event identifier and retain the capture sequence separately from wall-clock time. Timestamps can collide or move backward when a system clock is adjusted; use the sequence number to preserve observation order within one capture session. Do not use the sender IP/MAC pair as a unique event ID because repeated observations are meaningful evidence. On export, preserve the capture-session identifier so events from separate interfaces or sessions are not accidentally merged.
+
+
+## VLAN visibility and observation identity
+
+When the capture source exposes VLAN headers, preserve the observed tag identifiers and their outer-to-inner order in the event context. Include the interface on every observation; do not merge otherwise identical IP/MAC pairs across interfaces or known VLAN contexts.
+
+Some capture drivers remove VLAN tags before delivering packets. In that case, record the VLAN visibility as unavailable rather than claiming the frame was untagged. Baseline keys and alert comparisons must use only context that was actually observed or explicitly configured. Tests should cover tagged frames, untagged frames, and captures where VLAN metadata is unavailable.
