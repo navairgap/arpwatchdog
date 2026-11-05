@@ -6,6 +6,7 @@ Input frames are supplied by the operator; this program never sends ARP probes.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -27,8 +28,8 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
         raise ValueError("interface must contain 1 to 15 characters")
     if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
         raise ValueError("timestamp must be numeric")
-    if timestamp < 0:
-        raise ValueError("timestamp must not be negative")
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError("timestamp must be finite and not negative")
 
     offset = 14
     ethertype = int.from_bytes(frame[12:14], "big")
