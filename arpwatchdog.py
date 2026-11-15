@@ -643,8 +643,16 @@ class WebhookSink:
             print(f"arpwatchdog: webhook delivery failed: {exc}", file=sys.stderr)
 
 
-def _print_event(event: "dict") -> None:
-    print(json.dumps(event, sort_keys=True))
+def severity_for(event: "dict") -> str:
+    """Assign an operator-facing severity; signals, not verdicts."""
+    if event.get("flip_flop"):
+        return "critical"
+    kind = str(event.get("event"))
+    if kind == "gateway_mac_changed":
+        return "critical"
+    if kind == "mapping_changed":
+        return "warning"
+    return "info"
 
 
 def multi_sink(*sinks: "callable") -> "callable":
@@ -717,6 +725,7 @@ class Monitor:
         if self.suppressor is not None and not self.suppressor.allow(event):
             self.stats.suppressed += 1
             return None
+        event["severity"] = severity_for(event)
         self.stats.count_alert(str(event.get("event")))
         self.sink(event)
         return event

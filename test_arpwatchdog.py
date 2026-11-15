@@ -25,6 +25,7 @@ from arpwatchdog import (
     observation_from_scapy_packet,
     parse_frame,
     save_baseline,
+    severity_for,
     Stats,
     save_state,
     rfc3339,
@@ -643,6 +644,42 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("stats:", captured_err.getvalue())
         self.assertIn("arp_observations=1", captured_err.getvalue())
+
+
+class SeverityTests(unittest.TestCase):
+    def test_each_kind_gets_a_severity(self):
+        self.assertEqual(severity_for({"event": "new_host"}), "info")
+        self.assertEqual(severity_for({"event": "mapping_changed"}), "warning")
+        self.assertEqual(severity_for({"event": "gateway_mac_changed"}), "critical")
+
+    def test_flip_flop_upgrades_severity_to_critical(self):
+        self.assertEqual(severity_for({"event": "mapping_changed", "flip_flop": {"changes": 3}}),
+                         "critical")
+
+    def test_events_carry_severity_through_monitor(self):
+        import io as _io
+        captured = []
+        monitor = Monitor(Tracker(), sink=captured.append)
+        records = [
+            CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10"),
+            CliTests.record("eth0", 2, "02:00:00:00:00:02", "192.0.2.10"),
+        ]
+        monitor.run_jsonl(_io.StringIO("\n".join(records) + "\n"))
+        self.assertEqual([event["severity"] for event in captured], ["info", "warning"])
+
+    def test_cli_events_include_severity(self):
+        records = [
+            CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10"),
+            CliTests.record("eth0", 2, "02:00:00:00:00:02", "192.0.2.10"),
+        ]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, _err = cli.run_cli(["--no-suppress"], records)
+            events = [json.loads(line) for line in out.strip().splitlines()]
+            self.assertEqual([e["severity"] for e in events], ["info", "warning"])
+        finally:
+            cli._restore()
 
 
 if __name__ == "__main__":
