@@ -1,8 +1,11 @@
+import json
+import sys
 import unittest
 
 from arpwatchdog import (
     SCHEMA_VERSION,
     IpFilter,
+    main,
     Observation,
     ScapySource,
     Suppressor,
@@ -383,6 +386,115 @@ class ScapySourceTests(unittest.TestCase):
     def test_scapy_source_requires_interface(self):
         with self.assertRaises(ValueError):
             ScapySource("")
+
+
+class CliTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+
+    def setUp(self):
+        import io
+        self.stdout = io.StringIO()
+        self.stderr = io.StringIO()
+        self._saved = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = self.stdout, self.stderr
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        sys.stdout, sys.stderr = self._saved
+
+    @staticmethod
+    def record(interface, ts, mac, ip):
+        frame = arp_frame(mac, ip)
+        import json as _json
+        return _json.dumps({
+            "interface": interface, "timestamp": ts,
+            "frame_hex": frame.hex(),
+        })
+
+    def run_cli(self, argv, records):
+        import io as _io
+        stream = _io.StringIO("\n".join(records) + "\n")
+        self.stdout.seek(0)
+        self.stdout.truncate(0)
+        self.stderr.seek(0)
+        self.stderr.truncate(0)
+        code = main_with_streams(argv, stream)
+        return code, self.stdout.getvalue(), self.stderr.getvalue()
+
+    def test_replay_emits_json_events(self):
+        records = [
+            self.record("eth0", 1, self.MAC_A, "192.0.2.10"),
+            self.record("eth0", 2, self.MAC_B, "192.0.2.10"),
+        ]
+        code, out, err = self.run_cli(["--no-suppress"], records)
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in out.strip().splitlines()]
+        self.assertEqual([e["event"] for e in events], ["new_host", "mapping_changed"])
+
+    def test_ignore_cidr_suppresses_events(self):
+        records = [
+            self.record("eth0", 1, self.MAC_A, "192.0.2.10"),
+            self.record("eth0", 2, self.MAC_B, "192.0.2.10"),
+        ]
+        code, out, _err = self.run_cli(["--ignore", "192.0.2.0/24"], records)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "")
+
+    def test_suppression_deduplicates_repeats(self):
+        records = [
+            self.record("eth0", 1, self.MAC_A, "192.0.2.10"),
+            self.record("eth0", 2, self.MAC_B, "192.0.2.10"),
+            self.record("eth0", 3, self.MAC_A, "192.0.2.10"),
+            self.record("eth0", 4, self.MAC_B, "192.0.2.10"),
+        ]
+        code, out, _err = self.run_cli(["--suppress-window", "600"], records)
+        events = [json.loads(line) for line in out.strip().splitlines()]
+        self.assertEqual([e["event"] for e in events], ["new_host", "mapping_changed"])
+
+    def test_list_prints_learned_table(self):
+        records = [self.record("eth0", 1, self.MAC_A, "192.0.2.10")]
+        code, out, _err = self.run_cli(["--no-new-hosts", "--list"], records)
+        self.assertIn("02:00:00:00:00:01  192.0.2.10", out)
+
+    def test_state_round_trip_through_cli(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        state_path = os.path.join(workdir.name, "state.json")
+        records = [self.record("eth0", 1, self.MAC_A, "192.0.2.30")]
+        self.run_cli(["--state", state_path], records)
+        first, _gateways, _problems = load_state(state_path)
+        self.assertEqual(first, {"192.0.2.30": self.MAC_A})
+        # A second run over the same address must not emit new_host again.
+        records = [self.record("eth0", 2, self.MAC_A, "192.0.2.30")]
+        code, out, _err = self.run_cli(["--state", state_path], records)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "")
+
+    def test_missing_replay_file_returns_two(self):
+        code, _out, err = self.run_cli(["--replay", "/nonexistent/file.jsonl"], [])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot open replay file", err)
+
+    def test_gateway_flag_raises_gateway_event(self):
+        records = [
+            self.record("eth0", 1, self.MAC_A, "192.0.2.1"),
+            self.record("eth0", 2, self.MAC_B, "192.0.2.1"),
+        ]
+        code, out, _err = self.run_cli(["--gateway", "192.0.2.1"], records)
+        events = [json.loads(line) for line in out.strip().splitlines()]
+        self.assertEqual(events[-1]["event"], "gateway_mac_changed")
+
+
+def main_with_streams(argv, stream):
+    """Run main() with a substituted stdin stream for replay tests."""
+    saved = sys.stdin
+    sys.stdin = stream
+    try:
+        return main(argv)
+    finally:
+        sys.stdin = saved
 
 
 if __name__ == "__main__":

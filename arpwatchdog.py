@@ -516,20 +516,179 @@ class Tracker:
         }
 
 
-def main() -> int:
-    """Read JSONL records with interface, timestamp and frame_hex from stdin."""
-    tracker = Tracker()
-    for line_number, line in enumerate(sys.stdin, 1):
+class Monitor:
+    """Wires a packet source into detections, filters, suppression and output."""
+
+    def __init__(
+        self,
+        tracker: Tracker,
+        suppressor: "Suppressor | None" = None,
+        ip_filter: "IpFilter | None" = None,
+        sink: "callable | None" = None,
+    ) -> None:
+        self.tracker = tracker
+        self.suppressor = suppressor
+        self.ip_filter = ip_filter
+        self.sink = sink or _print_event
+        self.observations_seen = 0
+
+    def handle_observation(self, item: Observation) -> "dict | None":
+        """Run one observation through detections and the alert pipeline."""
+        self.observations_seen += 1
+        event = self.tracker.observe(item)
+        if event is None:
+            return None
+        if self.ip_filter is not None and self.ip_filter.matches(str(event["ip"])):
+            return None
+        if self.suppressor is not None and not self.suppressor.allow(event):
+            return None
+        self.sink(event)
+        return event
+
+    def run_jsonl(self, stream: "object") -> int:
+        """Read JSONL records with interface, timestamp and frame_hex."""
+        problems = 0
+        for line_number, line in enumerate(stream, 1):
+            try:
+                record = json.loads(line)
+                frame = bytes.fromhex(record["frame_hex"])
+                item = parse_frame(frame, record["interface"], record["timestamp"])
+                if item is not None:
+                    self.handle_observation(item)
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                problems += 1
+                print(f"arpwatchdog: line {line_number}: {exc}", file=sys.stderr)
+        return problems
+
+    def run_live(self, interface: str) -> None:
+        """Capture passively from an interface until interrupted."""
+        source = ScapySource(interface)
         try:
-            record = json.loads(line)
-            frame = bytes.fromhex(record["frame_hex"])
-            item = parse_frame(frame, record["interface"], record["timestamp"])
-            if item is not None:
-                event = tracker.observe(item)
-                if event is not None:
-                    print(json.dumps(event, sort_keys=True))
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            print(f"arpwatchdog: line {line_number}: {exc}", file=sys.stderr)
+            for item in source.observations():
+                self.handle_observation(item)
+        except KeyboardInterrupt:
+            pass
+
+
+def _print_event(event: "dict") -> None:
+    print(json.dumps(event, sort_keys=True))
+
+
+def build_parser() -> "object":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="arpwatchdog",
+        description="Passive ARP spoofing detector: watches IP/MAC changes, "
+                    "flip-flops and gateway moves. Never sends probes.",
+    )
+    parser.add_argument("-i", "--interface", metavar="IFACE",
+                        help="capture ARP live on this interface (requires scapy)")
+    parser.add_argument("-r", "--replay", metavar="FILE", default=None,
+                        help="replay JSONL records from FILE ('-' or omitted reads stdin)")
+    parser.add_argument("-f", "--baseline", metavar="FILE",
+                        help="load an arp.dat-style baseline (mac ip per line)")
+    parser.add_argument("--state", metavar="FILE",
+                        help="load and periodically save learned state as JSON")
+    parser.add_argument("--gateway", action="append", default=[], metavar="IP",
+                        help="watch this gateway (repeatable; auto-detected in live mode)")
+    parser.add_argument("--ignore", action="append", default=[], metavar="CIDR",
+                        help="ignore events for this CIDR range (repeatable)")
+    parser.add_argument("--no-new-hosts", action="store_true",
+                        help="do not emit new_host events")
+    parser.add_argument("--no-suppress", action="store_true",
+                        help="emit every event without deduplication")
+    parser.add_argument("--suppress-window", type=float, default=60.0, metavar="SEC",
+                        help="alert deduplication window in seconds (default 60)")
+    parser.add_argument("--flip-window", type=float, default=300.0, metavar="SEC",
+                        help="flip-flop detection window in seconds (default 300)")
+    parser.add_argument("--flip-changes", type=int, default=3, metavar="N",
+                        help="MAC changes within the window that flag a flip-flop (default 3)")
+    parser.add_argument("--max-entries", type=int, default=4096, metavar="N",
+                        help="maximum tracked IP addresses (default 4096)")
+    parser.add_argument("--list", action="store_true",
+                        help="print the learned IP/MAC table after processing and exit")
+    parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
+                        help="export the learned table as json or csv")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.0.0")
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = build_parser()
+    options = parser.parse_args(argv)
+
+    try:
+        tracker = Tracker(
+            max_entries=options.max_entries,
+            report_new_hosts=not options.no_new_hosts,
+            flip_flop_window=options.flip_window,
+            flip_flop_changes=options.flip_changes,
+        )
+        if options.baseline:
+            entries, problems = load_baseline(options.baseline)
+            tracker.seed_baseline(entries)
+            for problem in problems:
+                print(f"arpwatchdog: baseline: {problem}", file=sys.stderr)
+        state_entries, state_gateways, state_problems = {}, [], []
+        if options.state:
+            state_entries, state_gateways, state_problems = load_state(options.state)
+            tracker.seed_baseline(state_entries)
+            for problem in state_problems:
+                print(f"arpwatchdog: state: {problem}", file=sys.stderr)
+        gateways = set(options.gateway) | set(state_gateways)
+        if not gateways and options.interface:
+            gateways = set(detect_default_gateways())
+        if gateways:
+            tracker.set_gateways(gateways)
+        suppressor = None if options.no_suppress else Suppressor(options.suppress_window)
+        ip_filter = IpFilter(options.ignore)
+        monitor = Monitor(tracker, suppressor=suppressor, ip_filter=ip_filter)
+    except ValueError as exc:
+        print(f"arpwatchdog: {exc}", file=sys.stderr)
+        return 2
+
+    if options.interface:
+        monitor.run_live(options.interface)
+    else:
+        if options.replay in (None, "-"):
+            stream = sys.stdin
+        else:
+            try:
+                stream = open(options.replay, "r", encoding="utf-8")
+            except OSError as exc:
+                print(f"arpwatchdog: cannot open replay file: {exc}", file=sys.stderr)
+                return 2
+        try:
+            problems = monitor.run_jsonl(stream)
+        finally:
+            if stream is not sys.stdin:
+                stream.close()
+        if problems:
+            print(f"arpwatchdog: {problems} malformed input line(s)", file=sys.stderr)
+
+    if options.state:
+        save_state(options.state, tracker.export_baseline(), tracker.gateways)
+    if options.list:
+        for ip, mac in sorted(
+            tracker.export_baseline().items(), key=lambda kv: ip_to_int(kv[0])
+        ):
+            print(f"{mac}  {ip}")
+    if options.export:
+        export_format, export_path = options.export
+        if export_format not in ("json", "csv"):
+            parser.error("export format must be json or csv")
+        if export_format == "json":
+            with open(export_path, "w", encoding="utf-8") as handle:
+                json.dump(tracker.export_baseline(), handle, sort_keys=True, indent=2)
+                handle.write("\n")
+        else:
+            with open(export_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write("ip,mac\n")
+                for ip, mac in sorted(
+                    tracker.export_baseline().items(), key=lambda kv: ip_to_int(kv[0])
+                ):
+                    handle.write(f"{ip},{mac}\n")
     return 0
 
 
