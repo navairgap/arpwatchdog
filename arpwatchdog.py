@@ -189,6 +189,51 @@ class Suppressor:
         return True
 
 
+def ip_to_int(ip: str) -> int:
+    """Convert a canonical dotted-quad IPv4 string to its integer value."""
+    value = 0
+    for part in canonical_ip(ip).split("."):
+        value = (value << 8) | int(part)
+    return value
+
+
+class IpFilter:
+    """Match IPv4 addresses against configured ignore CIDR ranges."""
+
+    def __init__(self, ranges: "Iterable[str]" = ()) -> None:
+        self._networks: list[tuple[int, int]] = []
+        for entry in ranges or ():
+            self.add(entry)
+
+    def add(self, entry: str) -> None:
+        """Add one CIDR range (a bare address is treated as /32)."""
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError("ignore entries must be non-empty strings")
+        text = entry.strip()
+        if "/" in text:
+            address, prefix_text = text.split("/", 1)
+            prefix = int(prefix_text)
+        else:
+            address, prefix = text, 32
+        if not 0 <= prefix <= 32:
+            raise ValueError(f"prefix length out of range: {entry!r}")
+        network = ip_to_int(address)
+        if prefix:
+            mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+            network &= mask
+        else:
+            mask = 0
+        self._networks.append((network, mask))
+
+    def matches(self, ip: str) -> bool:
+        """Return True when ip falls inside any configured ignore range."""
+        value = ip_to_int(ip)
+        return any(value & mask == network for network, mask in self._networks)
+
+    def __len__(self) -> int:
+        return len(self._networks)
+
+
 class Tracker:
     """Bounded IP-to-MAC history; changes are observations, not attack verdicts."""
 

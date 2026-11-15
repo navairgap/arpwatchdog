@@ -2,6 +2,7 @@ import unittest
 
 from arpwatchdog import (
     SCHEMA_VERSION,
+    IpFilter,
     Observation,
     Suppressor,
     Tracker,
@@ -238,6 +239,30 @@ class SuppressorTests(unittest.TestCase):
         for index in range(5):
             suppressor.allow(self.alert(ip=f"192.0.2.{index}", ts=index))
         self.assertEqual(len(suppressor._last), 2)
+
+
+class IpFilterTests(unittest.TestCase):
+    def test_cidr_ranges_match_and_reject(self):
+        ip_filter = IpFilter(["10.0.0.0/8", "192.0.2.5"])
+        self.assertTrue(ip_filter.matches("10.255.3.4"))
+        self.assertTrue(ip_filter.matches("192.0.2.5"))
+        self.assertFalse(ip_filter.matches("192.0.2.6"))
+        self.assertFalse(ip_filter.matches("11.0.0.1"))
+
+    def test_zero_prefix_ignores_everything(self):
+        ip_filter = IpFilter(["0.0.0.0/0"])
+        self.assertTrue(ip_filter.matches("203.0.113.9"))
+
+    def test_bad_entries_are_rejected(self):
+        with self.assertRaises(ValueError):
+            IpFilter(["192.0.2.0/33"])
+        with self.assertRaises(ValueError):
+            IpFilter(["not-an-ip/8"])
+
+    def test_empty_filter_matches_nothing(self):
+        ip_filter = IpFilter()
+        self.assertFalse(ip_filter.matches("192.0.2.1"))
+        self.assertEqual(len(ip_filter), 0)
 
 
 if __name__ == "__main__":
