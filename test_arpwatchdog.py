@@ -4,6 +4,7 @@ from arpwatchdog import (
     SCHEMA_VERSION,
     IpFilter,
     Observation,
+    ScapySource,
     Suppressor,
     Tracker,
     canonical_ip,
@@ -11,6 +12,7 @@ from arpwatchdog import (
     detect_default_gateways,
     load_baseline,
     load_state,
+    observation_from_scapy_packet,
     parse_frame,
     save_baseline,
     save_state,
@@ -345,6 +347,42 @@ class StateTests(unittest.TestCase):
         save_state(self.path, {})
         self.assertFalse(os.path.exists(self.path + ".tmp"))
         self.assertTrue(os.path.exists(self.path))
+
+
+class ScapySourceTests(unittest.TestCase):
+    def build_packet(self, sender_mac, sender_ip, target_ip="192.0.2.1", gratuitous=False):
+        from scapy.layers.l2 import ARP, Ether
+        if gratuitous:
+            target_ip = sender_ip
+        return Ether(src=sender_mac, dst="ff:ff:ff:ff:ff:ff") / ARP(
+            op=2, hwsrc=sender_mac, psrc=sender_ip, pdst=target_ip,
+        )
+
+    def test_converts_reply_packet(self):
+        packet = self.build_packet("02:00:00:00:00:01", "192.0.2.10")
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.ip, "192.0.2.10")
+        self.assertEqual(item.mac, "02:00:00:00:00:01")
+        self.assertEqual(item.kind, "arp_reply")
+
+    def test_converts_gratuitous_packet(self):
+        packet = self.build_packet("02:00:00:00:00:07", "192.0.2.7", gratuitous=True)
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertEqual(item.kind, "gratuitous_arp")
+
+    def test_filters_probes_and_non_arp(self):
+        from scapy.layers.inet import IP, TCP
+        from scapy.layers.l2 import Ether
+        self.assertIsNone(observation_from_scapy_packet(
+            self.build_packet("02:00:00:00:00:01", "0.0.0.0"), "eth0"
+        ))
+        tcp_packet = Ether() / IP(src="192.0.2.10", dst="192.0.2.1") / TCP()
+        self.assertIsNone(observation_from_scapy_packet(tcp_packet, "eth0"))
+
+    def test_scapy_source_requires_interface(self):
+        with self.assertRaises(ValueError):
+            ScapySource("")
 
 
 if __name__ == "__main__":

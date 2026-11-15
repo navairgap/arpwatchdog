@@ -97,6 +97,13 @@ class Observation:
     target_mac: str = ""
 
 
+def classify_arp(sender_ip: str, target_ip: str, operation: int) -> str:
+    """Name the packet kind; announcements repeat the sender address (RFC 5227)."""
+    if sender_ip == target_ip:
+        return "gratuitous_arp"
+    return "arp_reply" if operation == 2 else "arp_request"
+
+
 def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation | None:
     """Parse one Ethernet ARP frame, including up to two VLAN tags."""
     if not isinstance(frame, bytes) or len(frame) < 14:
@@ -141,18 +148,80 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
     # RFC 5227 address probes use 0.0.0.0 and do not claim ownership.
     if sender_ip == "0.0.0.0":
         return None
-    # RFC 5227 section 3: announcements repeat the sender address in the
-    # target fields; spoofing tools and address changes both use them.
-    if sender_ip == target_ip:
-        kind = "gratuitous_arp"
-    elif operation == 2:
-        kind = "arp_reply"
-    else:
-        kind = "arp_request"
     return Observation(
         interface, float(timestamp), sender_ip, sender_mac,
-        operation=operation, kind=kind, target_ip=target_ip, target_mac=target_mac,
+        operation=operation,
+        kind=classify_arp(sender_ip, target_ip, operation),
+        target_ip=target_ip, target_mac=target_mac,
     )
+
+
+def observation_from_scapy_packet(packet: object, interface: str) -> "Observation | None":
+    """Convert one captured scapy packet into an Observation (receive only)."""
+    try:
+        from scapy.layers.l2 import ARP, Ether  # noqa: PLC0415 - optional dependency
+    except ImportError:  # pragma: no cover - exercised only without scapy
+        raise RuntimeError(
+            "live capture requires scapy (pip install scapy); "
+            "use replay mode to process saved JSONL instead"
+        ) from None
+    arp_layer = packet.getlayer(ARP)
+    if arp_layer is None:
+        return None
+    sender_ip = str(arp_layer.psrc)
+    if sender_ip == "0.0.0.0":
+        return None
+    operation = int(arp_layer.op)
+    if operation not in (1, 2):
+        return None
+    sender_mac = canonical_mac(str(arp_layer.hwsrc))
+    target_ip = str(arp_layer.pdst)
+    timestamp = float(packet.time)
+    ether_layer = packet.getlayer(Ether)
+    target_mac = canonical_mac(str(ether_layer.dst)) if ether_layer is not None else ""
+    return Observation(
+        interface, timestamp, canonical_ip(sender_ip), sender_mac,
+        operation=operation,
+        kind=classify_arp(sender_ip, target_ip, operation),
+        target_ip=canonical_ip(target_ip), target_mac=target_mac,
+    )
+
+
+class ScapySource:
+    """Passive live ARP capture; never transmits packets or probes."""
+
+    def __init__(self, interface: str, chunk_seconds: float = 1.0) -> None:
+        if not interface:
+            raise ValueError("an interface name is required for live capture")
+        self.interface = interface
+        self.chunk_seconds = chunk_seconds
+
+    def observations(self):
+        """Yield Observations forever, one sniff chunk at a time."""
+        try:
+            from scapy.all import sniff  # noqa: PLC0415 - optional dependency
+        except ImportError as exc:
+            raise RuntimeError(
+                "live capture requires scapy (pip install scapy); "
+                "use replay mode to process saved JSONL instead"
+            ) from exc
+        pending: list[object] = []
+        while True:
+            del pending[:]
+            sniff(
+                iface=self.interface,
+                filter="arp",
+                store=False,
+                timeout=self.chunk_seconds,
+                prn=pending.append,
+            )
+            for packet in pending:
+                try:
+                    item = observation_from_scapy_packet(packet, self.interface)
+                except ValueError:
+                    continue
+                if item is not None:
+                    yield item
 
 
 def load_baseline(path: str) -> "tuple[dict[str, str], list[str]]":
