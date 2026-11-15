@@ -155,6 +155,43 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
     )
 
 
+def load_baseline(path: str) -> "tuple[dict[str, str], list[str]]":
+    """Read an arpwatch-style arp.dat baseline; returns (entries, problems).
+
+    Accepted line shapes: `mac ip`, or the extended `mac ip interface time`
+    form written by modern arpwatch. Malformed lines are skipped and reported.
+    """
+    entries: dict[str, str] = {}
+    problems: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        return entries, [str(exc)]
+    for line_number, line in enumerate(lines, 1):
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            mac = canonical_mac(parts[0])
+            ip = canonical_ip(parts[1])
+        except (ValueError, IndexError) as exc:
+            problems.append(f"line {line_number}: {exc}")
+            continue
+        if ip in entries and entries[ip] != mac:
+            problems.append(f"line {line_number}: duplicate claim for {ip}")
+            continue
+        entries[ip] = mac
+    return entries, problems
+
+
+def save_baseline(path: str, entries: "dict[str, str]") -> None:
+    """Write a classic `mac ip` arp.dat baseline file."""
+    with open(path, "w", encoding="utf-8") as handle:
+        for ip, mac in sorted(entries.items(), key=lambda kv: (ip_to_int(kv[0]))):
+            handle.write(f"{mac} {ip}\n")
+
+
 class Suppressor:
     """Bounded per-(event, ip) alert deduplication with a configurable window."""
 
@@ -266,6 +303,23 @@ class Tracker:
         """Replace the watched gateway set; addresses are canonicalized first."""
         self.gateways = {canonical_ip(ip) for ip in gateways}
 
+    def seed_baseline(self, entries: "dict[str, str]", timestamp: float = 0.0) -> None:
+        """Pre-load known IP/MAC pairs so known hosts do not alert as new."""
+        for ip, mac in entries.items():
+            canonical = Observation("baseline", timestamp, canonical_ip(ip), canonical_mac(mac))
+            if canonical.ip in self._seen:
+                continue
+            self._seen[canonical.ip] = canonical
+        self._prune()
+
+    def export_baseline(self) -> "dict[str, str]":
+        """Return the current learned IP/MAC map for persistence."""
+        return {item.ip: item.mac for item in self._seen.values()}
+
+    def _prune(self) -> None:
+        while len(self._seen) > self.max_entries:
+            self._seen.popitem(last=False)
+
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
             item.interface, item.timestamp, canonical_ip(item.ip), canonical_mac(item.mac),
@@ -275,8 +329,7 @@ class Tracker:
         previous = self._seen.get(item.ip)
         self._seen[item.ip] = item
         self._seen.move_to_end(item.ip)
-        while len(self._seen) > self.max_entries:
-            self._seen.popitem(last=False)
+        self._prune()
         if previous is None:
             if self.report_new_hosts:
                 event = make_event(

@@ -9,7 +9,9 @@ from arpwatchdog import (
     canonical_ip,
     canonical_mac,
     detect_default_gateways,
+    load_baseline,
     parse_frame,
+    save_baseline,
     rfc3339,
 )
 
@@ -263,6 +265,52 @@ class IpFilterTests(unittest.TestCase):
         ip_filter = IpFilter()
         self.assertFalse(ip_filter.matches("192.0.2.1"))
         self.assertEqual(len(ip_filter), 0)
+
+
+class BaselineTests(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "arp.dat")
+        self.addCleanup(self.dir.cleanup)
+
+    def test_load_classic_and_extended_lines(self):
+        with open(self.path, "w") as handle:
+            handle.write("02:00:00:00:00:01 192.0.2.10\n")
+            handle.write("02:00:00:00:00:02 192.0.2.11 eth0 1730000000\n")
+            handle.write("\n")
+            handle.write("bogus line\n")
+        entries, problems = load_baseline(self.path)
+        self.assertEqual(entries, {
+            "192.0.2.10": "02:00:00:00:00:01",
+            "192.0.2.11": "02:00:00:00:00:02",
+        })
+        self.assertEqual(len(problems), 1)
+
+    def test_load_missing_file_returns_problem(self):
+        entries, problems = load_baseline("/nonexistent/arp.dat")
+        self.assertEqual(entries, {})
+        self.assertEqual(len(problems), 1)
+
+    def test_seeded_baseline_suppresses_new_host_but_not_changes(self):
+        tracker = Tracker()
+        tracker.seed_baseline({"192.0.2.10": "02:00:00:00:00:01"})
+        self.assertIsNone(tracker.observe(
+            Observation("eth0", 10, "192.0.2.10", "02:00:00:00:00:01")
+        ))
+        event = tracker.observe(
+            Observation("eth0", 11, "192.0.2.10", "02:00:00:00:00:02")
+        )
+        self.assertEqual(event["event"], "mapping_changed")
+        self.assertEqual(event["previous_mac"], "02:00:00:00:00:01")
+
+    def test_baseline_round_trip(self):
+        tracker = Tracker()
+        tracker.observe(Observation("eth0", 1, "192.0.2.20", "02:00:00:00:00:09"))
+        save_baseline(self.path, tracker.export_baseline())
+        entries, problems = load_baseline(self.path)
+        self.assertEqual(problems, [])
+        self.assertEqual(entries, {"192.0.2.20": "02:00:00:00:00:09"})
 
 
 if __name__ == "__main__":
