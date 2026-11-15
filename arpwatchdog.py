@@ -5,11 +5,62 @@ Input frames are supplied by the operator; this program never sends ARP probes.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
+
+SCHEMA_VERSION = 1
+
+
+def canonical_mac(mac: str) -> str:
+    """Normalize a MAC address to six lowercase colon-separated octets."""
+    if not isinstance(mac, str):
+        raise ValueError("MAC address must be a string")
+    cleaned = mac.strip().lower().replace("-", ":")
+    if len(cleaned) != 17 or cleaned.count(":") != 5:
+        raise ValueError(f"invalid MAC address: {mac!r}")
+    octets = cleaned.split(":")
+    for octet in octets:
+        if len(octet) != 2 or any(c not in "0123456789abcdef" for c in octet):
+            raise ValueError(f"invalid MAC address: {mac!r}")
+    return cleaned
+
+
+def canonical_ip(ip: str) -> str:
+    """Validate and return a canonical dotted-quad IPv4 address string."""
+    if not isinstance(ip, str):
+        raise ValueError("IPv4 address must be a string")
+    parts = ip.strip().split(".")
+    if len(parts) != 4:
+        raise ValueError(f"invalid IPv4 address: {ip!r}")
+    for part in parts:
+        if not part.isdigit() or (len(part) > 1 and part[0] == "0"):
+            raise ValueError(f"invalid IPv4 address: {ip!r}")
+        if not 0 <= int(part) <= 255:
+            raise ValueError(f"invalid IPv4 address: {ip!r}")
+    return ".".join(parts)
+
+
+def rfc3339(timestamp: float) -> str:
+    """Render a Unix epoch timestamp as a UTC RFC 3339 string."""
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        raise ValueError("timestamp must be numeric")
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError("timestamp must be finite and not negative")
+    moment = _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S") + f".{moment.microsecond // 1000:03d}Z"
+
+
+def make_event(kind: str, **fields: object) -> dict[str, object]:
+    """Build a schema v1 event envelope with the required fixed fields."""
+    if not kind or not isinstance(kind, str):
+        raise ValueError("event kind must be a non-empty string")
+    event: dict[str, object] = {"schema_version": SCHEMA_VERSION, "event": kind}
+    event.update(fields)
+    return event
 
 
 @dataclass(frozen=True)
@@ -75,6 +126,9 @@ class Tracker:
         self._seen: OrderedDict[str, Observation] = OrderedDict()
 
     def observe(self, item: Observation) -> dict[str, object] | None:
+        item = Observation(
+            item.interface, item.timestamp, canonical_ip(item.ip), canonical_mac(item.mac)
+        )
         previous = self._seen.get(item.ip)
         self._seen[item.ip] = item
         self._seen.move_to_end(item.ip)
@@ -84,17 +138,19 @@ class Tracker:
             return None
         if previous.mac == item.mac:
             return None
-        return {
-            "event": "mapping_changed",
-            "ip": item.ip,
-            "previous_mac": previous.mac,
-            "current_mac": item.mac,
-            "previous_interface": previous.interface,
-            "interface": item.interface,
-            "first_seen": previous.timestamp,
-            "observed_at": item.timestamp,
-            "assessment": "investigate; a mapping change alone is not proof of spoofing",
-        }
+        return make_event(
+            "mapping_changed",
+            ip=item.ip,
+            previous_mac=previous.mac,
+            current_mac=item.mac,
+            previous_interface=previous.interface,
+            interface=item.interface,
+            first_seen=rfc3339(previous.timestamp),
+            first_seen_epoch=previous.timestamp,
+            observed_at=rfc3339(item.timestamp),
+            observed_at_epoch=item.timestamp,
+            assessment="investigate; a mapping change alone is not proof of spoofing",
+        )
 
 
 def main() -> int:

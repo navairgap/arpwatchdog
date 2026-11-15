@@ -1,6 +1,14 @@
 import unittest
 
-from arpwatchdog import Observation, Tracker, parse_frame
+from arpwatchdog import (
+    SCHEMA_VERSION,
+    Observation,
+    Tracker,
+    canonical_ip,
+    canonical_mac,
+    parse_frame,
+    rfc3339,
+)
 
 
 def arp_frame(sender_mac, sender_ip, vlan=False):
@@ -44,6 +52,37 @@ class ArpParserTests(unittest.TestCase):
             parse_frame(b"short", "eth0", 1)
         with self.assertRaises(ValueError):
             parse_frame(arp_frame("02:00:00:00:00:01", "192.0.2.1"), "eth0", float("nan"))
+
+
+class CanonicalizationTests(unittest.TestCase):
+    def test_mac_forms_normalize_to_one_representation(self):
+        self.assertEqual(canonical_mac("AA:BB:CC:DD:EE:FF"), "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(canonical_mac("aa-bb-cc-dd-ee-ff"), "aa:bb:cc:dd:ee:ff")
+        with self.assertRaises(ValueError):
+            canonical_mac("aa:bb:cc:dd:ee")
+        with self.assertRaises(ValueError):
+            canonical_mac("zz:bb:cc:dd:ee:ff")
+
+    def test_ip_rejects_leading_zero_and_out_of_range_octets(self):
+        self.assertEqual(canonical_ip("192.0.2.1"), "192.0.2.1")
+        with self.assertRaises(ValueError):
+            canonical_ip("192.0.2.256")
+        with self.assertRaises(ValueError):
+            canonical_ip("010.0.2.1")
+        with self.assertRaises(ValueError):
+            canonical_ip("192.0.2")
+
+    def test_rfc3339_is_utc_with_milliseconds(self):
+        self.assertEqual(rfc3339(1730000000.5), "2024-10-27T03:33:20.500Z")
+
+    def test_events_carry_schema_version_and_rfc3339_times(self):
+        tracker = Tracker()
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", "02:00:00:00:00:01"))
+        event = tracker.observe(Observation("eth0", 2.25, "192.0.2.10", "02:00:00:00:00:02"))
+        self.assertEqual(event["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(event["observed_at"], "1970-01-01T00:00:02.250Z")
+        self.assertEqual(event["observed_at_epoch"], 2.25)
+        self.assertEqual(event["first_seen"], "1970-01-01T00:00:01.000Z")
 
 
 class TrackerTests(unittest.TestCase):
