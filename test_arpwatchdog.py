@@ -10,8 +10,10 @@ from arpwatchdog import (
     canonical_mac,
     detect_default_gateways,
     load_baseline,
+    load_state,
     parse_frame,
     save_baseline,
+    save_state,
     rfc3339,
 )
 
@@ -311,6 +313,38 @@ class BaselineTests(unittest.TestCase):
         entries, problems = load_baseline(self.path)
         self.assertEqual(problems, [])
         self.assertEqual(entries, {"192.0.2.20": "02:00:00:00:00:09"})
+
+
+class StateTests(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "arpwatchdog.state.json")
+        self.addCleanup(self.dir.cleanup)
+
+    def test_state_round_trip(self):
+        save_state(self.path, {"192.0.2.10": "02:00:00:00:00:01"}, gateways=["192.0.2.1"])
+        entries, gateways, problems = load_state(self.path)
+        self.assertEqual(problems, [])
+        self.assertEqual(entries, {"192.0.2.10": "02:00:00:00:00:01"})
+        self.assertEqual(gateways, ["192.0.2.1"])
+
+    def test_missing_state_is_empty(self):
+        entries, gateways, problems = load_state(self.path)
+        self.assertEqual((entries, gateways, problems), ({}, [], []))
+
+    def test_corrupt_state_reports_problem(self):
+        with open(self.path, "w") as handle:
+            handle.write("{not json")
+        entries, gateways, problems = load_state(self.path)
+        self.assertEqual((entries, gateways), ({}, []))
+        self.assertEqual(len(problems), 1)
+
+    def test_save_is_atomic_no_tmp_left_behind(self):
+        import os
+        save_state(self.path, {})
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+        self.assertTrue(os.path.exists(self.path))
 
 
 if __name__ == "__main__":

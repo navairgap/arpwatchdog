@@ -192,6 +192,49 @@ def save_baseline(path: str, entries: "dict[str, str]") -> None:
             handle.write(f"{mac} {ip}\n")
 
 
+def save_state(path: str, entries: "dict[str, str]", gateways: "Iterable[str]" = ()) -> None:
+    """Atomically persist learned mappings and watched gateways as JSON."""
+    import os
+    import time
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "saved_at": rfc3339(time.time()),
+        "entries": {ip: mac for ip, mac in entries.items()},
+        "gateways": sorted(gateways),
+    }
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp_path, path)
+
+
+def load_state(path: str) -> "tuple[dict[str, str], list[str], list[str]]":
+    """Restore persisted state; returns (entries, gateways, problems)."""
+    problems: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {}, [], problems
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [], [str(exc)]
+    entries: dict[str, str] = {}
+    for ip, mac in (payload.get("entries") or {}).items():
+        try:
+            entries[canonical_ip(ip)] = canonical_mac(mac)
+        except ValueError as exc:
+            problems.append(str(exc))
+    gateways: list[str] = []
+    for ip in payload.get("gateways") or []:
+        try:
+            gateways.append(canonical_ip(ip))
+        except ValueError as exc:
+            problems.append(str(exc))
+    return entries, gateways, problems
+
+
 class Suppressor:
     """Bounded per-(event, ip) alert deduplication with a configurable window."""
 
