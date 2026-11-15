@@ -10,6 +10,7 @@ import json
 import math
 import sys
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 SCHEMA_VERSION = 1
@@ -61,6 +62,27 @@ def make_event(kind: str, **fields: object) -> dict[str, object]:
     event: dict[str, object] = {"schema_version": SCHEMA_VERSION, "event": kind}
     event.update(fields)
     return event
+
+
+def detect_default_gateways(path: str = "/proc/net/route") -> list[str]:
+    """Read the Linux routing table and return the IPv4 default gateway addresses."""
+    try:
+        with open(path, "r", encoding="ascii") as handle:
+            rows = handle.readlines()[1:]
+    except OSError:
+        return []
+    gateways: list[str] = []
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 3 or fields[1] != "00000000":
+            continue
+        raw = fields[2]
+        if len(raw) != 8:
+            continue
+        address = bytes(int(raw[index:index + 2], 16) for index in (6, 4, 2, 0))
+        if any(address):
+            gateways.append(".".join(str(byte) for byte in address))
+    return gateways
 
 
 @dataclass(frozen=True)
@@ -142,6 +164,7 @@ class Tracker:
         report_new_hosts: bool = True,
         flip_flop_window: float = 300.0,
         flip_flop_changes: int = 3,
+        gateways: "Iterable[str]" = (),
     ) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
@@ -155,9 +178,14 @@ class Tracker:
         self.report_new_hosts = report_new_hosts
         self.flip_flop_window = float(flip_flop_window)
         self.flip_flop_changes = flip_flop_changes
+        self.gateways: set[str] = {canonical_ip(ip) for ip in gateways}
         self._seen: OrderedDict[str, Observation] = OrderedDict()
         # ip -> [(timestamp, mac), ...] for recent mapping changes, oldest first
         self._changes: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
+
+    def set_gateways(self, gateways: "Iterable[str]") -> None:
+        """Replace the watched gateway set; addresses are canonicalized first."""
+        self.gateways = {canonical_ip(ip) for ip in gateways}
 
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
@@ -172,24 +200,36 @@ class Tracker:
             self._seen.popitem(last=False)
         if previous is None:
             if self.report_new_hosts:
-                return make_event(
+                event = make_event(
                     "new_host",
                     ip=item.ip,
                     mac=item.mac,
                     interface=item.interface,
                     packet_kind=item.kind,
+                    gateway=item.ip in self.gateways,
                     observed_at=rfc3339(item.timestamp),
                     observed_at_epoch=item.timestamp,
                     assessment="first observation of this address; normal on startup "
                                "or after a baseline reset",
                 )
+                if item.ip in self.gateways:
+                    event["assessment"] = "first observation of a watched gateway; " \
+                                          "confirm this matches the real router"
+                return event
             return None
         if previous.mac == item.mac:
             return None
         self._record_change(item)
         flip_flop = self._detect_flip_flop(item)
+        kind = "gateway_mac_changed" if item.ip in self.gateways else "mapping_changed"
+        assessment = (
+            "a gateway MAC change is the classic ARP spoofing indicator; verify the "
+            "real router MAC from the device itself before assuming an attack"
+            if kind == "gateway_mac_changed"
+            else "investigate; a mapping change alone is not proof of spoofing"
+        )
         return make_event(
-            "mapping_changed",
+            kind,
             ip=item.ip,
             previous_mac=previous.mac,
             current_mac=item.mac,
@@ -200,7 +240,7 @@ class Tracker:
             observed_at=rfc3339(item.timestamp),
             observed_at_epoch=item.timestamp,
             flip_flop=flip_flop,
-            assessment="investigate; a mapping change alone is not proof of spoofing",
+            assessment=assessment,
         )
 
     def _record_change(self, item: Observation) -> None:

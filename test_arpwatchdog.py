@@ -6,6 +6,7 @@ from arpwatchdog import (
     Tracker,
     canonical_ip,
     canonical_mac,
+    detect_default_gateways,
     parse_frame,
     rfc3339,
 )
@@ -165,6 +166,48 @@ class FlipFlopTests(unittest.TestCase):
         flips = [event for event in events if event.get("flip_flop")]
         self.assertEqual(len(flips), 1)
         self.assertEqual(flips[0]["flip_flop"]["changes"], 2)
+
+
+class GatewayTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+
+    def test_gateway_change_raises_dedicated_event(self):
+        tracker = Tracker(report_new_hosts=False, gateways=["192.0.2.1"])
+        tracker.observe(Observation("eth0", 1, "192.0.2.1", self.MAC_A))
+        event = tracker.observe(Observation("eth0", 2, "192.0.2.1", self.MAC_B))
+        self.assertEqual(event["event"], "gateway_mac_changed")
+        self.assertIn("classic ARP spoofing indicator", event["assessment"])
+
+    def test_non_gateway_addresses_keep_mapping_changed(self):
+        tracker = Tracker(report_new_hosts=False, gateways=["192.0.2.1"])
+        tracker.observe(Observation("eth0", 1, "192.0.2.99", self.MAC_A))
+        event = tracker.observe(Observation("eth0", 2, "192.0.2.99", self.MAC_B))
+        self.assertEqual(event["event"], "mapping_changed")
+
+    def test_new_host_event_flags_gateway(self):
+        tracker = Tracker(report_new_hosts=True, gateways=["192.0.2.1"])
+        event = tracker.observe(Observation("eth0", 1, "192.0.2.1", self.MAC_A))
+        self.assertEqual(event["event"], "new_host")
+        self.assertTrue(event["gateway"])
+
+    def test_detect_default_gateways_parses_proc_route(self):
+        import tempfile, os
+        rows = (
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\n"
+            "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\n"
+            "eth0\tC0A80200\t00000000\t0001\t0\t0\t100\tFFFFFF00\t0\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".route", delete=False) as handle:
+            handle.write(rows)
+            path = handle.name
+        try:
+            self.assertEqual(detect_default_gateways(path), ["192.168.2.1"])
+        finally:
+            os.unlink(path)
+
+    def test_detect_default_gateways_missing_file_is_empty(self):
+        self.assertEqual(detect_default_gateways("/nonexistent/route"), [])
 
 
 if __name__ == "__main__":
