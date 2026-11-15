@@ -127,5 +127,45 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(len(tracker._seen), 2)
 
 
+class FlipFlopTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+
+    def feed(self, tracker, sequence):
+        events = []
+        for step, (ts, mac) in enumerate(sequence, 1):
+            event = tracker.observe(Observation("eth0", ts, "192.0.2.10", mac))
+            if event and event["event"] != "new_host":
+                events.append(event)
+        return events
+
+    def test_flags_alternation_between_two_macs(self):
+        tracker = Tracker(report_new_hosts=True, flip_flop_changes=3)
+        sequence = [(10, self.MAC_A), (20, self.MAC_B), (30, self.MAC_A), (40, self.MAC_B)]
+        events = self.feed(tracker, sequence)
+        self.assertEqual(len(events), 3)  # new_host suppressed, 3 mapping changes
+        flips = [event for event in events if event.get("flip_flop")]
+        self.assertEqual(len(flips), 1)
+        self.assertEqual(flips[0]["flip_flop"]["changes"], 3)
+        self.assertEqual(
+            flips[0]["flip_flop"]["macs"], {self.MAC_A: 1, self.MAC_B: 2}
+        )
+
+    def test_changes_outside_window_do_not_flip_flop(self):
+        tracker = Tracker(report_new_hosts=False, flip_flop_window=10)
+        sequence = [(0, self.MAC_A), (100, self.MAC_B), (200, self.MAC_A), (300, self.MAC_B)]
+        events = self.feed(tracker, sequence)
+        self.assertEqual(len(events), 3)
+        self.assertTrue(all(not event.get("flip_flop") for event in events))
+
+    def test_flip_flop_threshold_is_configurable(self):
+        tracker = Tracker(report_new_hosts=False, flip_flop_changes=2, flip_flop_window=60)
+        sequence = [(0, self.MAC_A), (10, self.MAC_B), (20, self.MAC_A)]
+        events = self.feed(tracker, sequence)
+        flips = [event for event in events if event.get("flip_flop")]
+        self.assertEqual(len(flips), 1)
+        self.assertEqual(flips[0]["flip_flop"]["changes"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

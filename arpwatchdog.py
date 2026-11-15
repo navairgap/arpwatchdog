@@ -136,12 +136,28 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
 class Tracker:
     """Bounded IP-to-MAC history; changes are observations, not attack verdicts."""
 
-    def __init__(self, max_entries: int = 4096, report_new_hosts: bool = True) -> None:
+    def __init__(
+        self,
+        max_entries: int = 4096,
+        report_new_hosts: bool = True,
+        flip_flop_window: float = 300.0,
+        flip_flop_changes: int = 3,
+    ) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
+        if isinstance(flip_flop_window, bool) or not isinstance(flip_flop_window, (int, float)) \
+                or not math.isfinite(flip_flop_window) or flip_flop_window <= 0:
+            raise ValueError("flip_flop_window must be a positive finite number")
+        if isinstance(flip_flop_changes, bool) or not isinstance(flip_flop_changes, int) \
+                or flip_flop_changes < 2:
+            raise ValueError("flip_flop_changes must be an integer of at least 2")
         self.max_entries = max_entries
         self.report_new_hosts = report_new_hosts
+        self.flip_flop_window = float(flip_flop_window)
+        self.flip_flop_changes = flip_flop_changes
         self._seen: OrderedDict[str, Observation] = OrderedDict()
+        # ip -> [(timestamp, mac), ...] for recent mapping changes, oldest first
+        self._changes: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
 
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
@@ -170,6 +186,8 @@ class Tracker:
             return None
         if previous.mac == item.mac:
             return None
+        self._record_change(item)
+        flip_flop = self._detect_flip_flop(item)
         return make_event(
             "mapping_changed",
             ip=item.ip,
@@ -181,8 +199,37 @@ class Tracker:
             first_seen_epoch=previous.timestamp,
             observed_at=rfc3339(item.timestamp),
             observed_at_epoch=item.timestamp,
+            flip_flop=flip_flop,
             assessment="investigate; a mapping change alone is not proof of spoofing",
         )
+
+    def _record_change(self, item: Observation) -> None:
+        """Remember one MAC transition for the flip-flop detector."""
+        history = self._changes.get(item.ip)
+        if history is None:
+            history = []
+            self._changes[item.ip] = history
+        history.append((item.timestamp, item.mac))
+        history[:] = [
+            (ts, mac) for ts, mac in history
+            if ts >= item.timestamp - self.flip_flop_window
+        ]
+
+    def _detect_flip_flop(self, item: Observation) -> dict[str, object] | None:
+        """Flag rapid alternation between MACs for one address within a window."""
+        history = self._changes.get(item.ip, [])
+        mac_counts: OrderedDict[str, int] = OrderedDict()
+        for _, mac in history:
+            mac_counts[mac] = mac_counts.get(mac, 0) + 1
+        if len(history) != self.flip_flop_changes or len(mac_counts) < 2:
+            return None
+        return {
+            "changes": len(history),
+            "window_seconds": self.flip_flop_window,
+            "macs": dict(mac_counts),
+            "note": "rapid MAC alternation; consistent with ARP spoofing but also "
+                    "with aggressive failover or NIC teaming",
+        }
 
 
 def main() -> int:
