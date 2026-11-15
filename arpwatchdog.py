@@ -516,6 +516,61 @@ class Tracker:
         }
 
 
+def format_event_text(event: "dict") -> str:
+    """One-line human-readable alert rendering."""
+    parts = [
+        event.get("observed_at") or "",
+        str(event.get("event")).upper(),
+        f"ip={event.get('ip')}",
+    ]
+    if "mac" in event:
+        parts.append(f"mac={event['mac']}")
+    if "previous_mac" in event:
+        parts.append(f"was={event['previous_mac']}")
+        parts.append(f"now={event['current_mac']}")
+    if "interface" in event:
+        parts.append(f"iface={event['interface']}")
+    assessment = event.get("assessment")
+    if assessment:
+        parts.append(f"-- {assessment}")
+    return "[" + " ".join(parts) + "]"
+
+
+CSV_COLUMNS = ("event", "ip", "mac", "previous_mac", "current_mac", "interface", "observed_at")
+
+
+def format_event_csv(event: "dict") -> str:
+    """One-line CSV alert rendering with a fixed column set."""
+    import csv as _csv
+    import io as _io
+
+    buffer = _io.StringIO()
+    writer = _csv.writer(buffer, lineterminator="\n")
+    writer.writerow([event.get(column, "") for column in CSV_COLUMNS])
+    return buffer.getvalue().rstrip("\n")
+
+
+def make_sink(format_name: str, stream: "object" = None) -> "callable":
+    """Build an event sink that writes the chosen format to a stream."""
+    import sys as _sys
+
+    stream = stream if stream is not None else _sys.stdout
+    formatters = {
+        "json": lambda event: json.dumps(event, sort_keys=True) + "\n",
+        "text": lambda event: format_event_text(event) + "\n",
+        "csv": lambda event: format_event_csv(event) + "\n",
+    }
+    if format_name not in formatters:
+        raise ValueError(f"unknown output format: {format_name}")
+    formatter = formatters[format_name]
+
+    def sink(event: "dict") -> None:
+        stream.write(formatter(event))
+        stream.flush()
+
+    return sink
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -606,6 +661,8 @@ def build_parser() -> "object":
                         help="MAC changes within the window that flag a flip-flop (default 3)")
     parser.add_argument("--max-entries", type=int, default=4096, metavar="N",
                         help="maximum tracked IP addresses (default 4096)")
+    parser.add_argument("--format", choices=("json", "text", "csv"), default="json",
+                        help="alert output format (default json)")
     parser.add_argument("--list", action="store_true",
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
@@ -643,7 +700,10 @@ def main(argv: "list[str] | None" = None) -> int:
             tracker.set_gateways(gateways)
         suppressor = None if options.no_suppress else Suppressor(options.suppress_window)
         ip_filter = IpFilter(options.ignore)
-        monitor = Monitor(tracker, suppressor=suppressor, ip_filter=ip_filter)
+        monitor = Monitor(
+            tracker, suppressor=suppressor, ip_filter=ip_filter,
+            sink=make_sink(options.format),
+        )
     except ValueError as exc:
         print(f"arpwatchdog: {exc}", file=sys.stderr)
         return 2

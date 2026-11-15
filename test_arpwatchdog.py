@@ -13,8 +13,11 @@ from arpwatchdog import (
     canonical_ip,
     canonical_mac,
     detect_default_gateways,
+    format_event_csv,
+    format_event_text,
     load_baseline,
     load_state,
+    make_sink,
     observation_from_scapy_packet,
     parse_frame,
     save_baseline,
@@ -495,6 +498,40 @@ def main_with_streams(argv, stream):
         return main(argv)
     finally:
         sys.stdin = saved
+
+
+class OutputFormatTests(unittest.TestCase):
+    def test_text_includes_time_kind_and_assessment(self):
+        event = {
+            "event": "gateway_mac_changed", "ip": "192.0.2.1",
+            "previous_mac": "02:00:00:00:00:01", "current_mac": "02:00:00:00:00:02",
+            "interface": "eth0", "observed_at": "2024-10-27T03:33:20.500Z",
+            "assessment": "a gateway MAC change is the classic ARP spoofing indicator",
+        }
+        line = format_event_text(event)
+        self.assertIn("GATEWAY_MAC_CHANGED", line)
+        self.assertIn("ip=192.0.2.1", line)
+        self.assertIn("was=02:00:00:00:00:01", line)
+        self.assertIn("now=02:00:00:00:00:02", line)
+        self.assertIn("2024-10-27T03:33:20.500Z", line)
+
+    def test_csv_has_fixed_columns_and_quoting(self):
+        event = {"event": "mapping_changed", "ip": "192.0.2.1",
+                 "current_mac": "02:00:00:00:00:02", "observed_at": "x"}
+        self.assertEqual(format_event_csv(event),
+                         "mapping_changed,192.0.2.1,,,02:00:00:00:00:02,,x")
+
+    def test_make_sink_writes_to_stream(self):
+        import io as _io
+        stream = _io.StringIO()
+        sink = make_sink("json", stream)
+        sink({"event": "new_host", "ip": "192.0.2.9"})
+        parsed = json.loads(stream.getvalue())
+        self.assertEqual(parsed["event"], "new_host")
+
+    def test_unknown_format_rejected(self):
+        with self.assertRaises(ValueError):
+            make_sink("yaml")
 
 
 if __name__ == "__main__":
