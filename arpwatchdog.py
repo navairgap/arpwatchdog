@@ -155,6 +155,40 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
     )
 
 
+class Suppressor:
+    """Bounded per-(event, ip) alert deduplication with a configurable window."""
+
+    def __init__(
+        self,
+        window: float = 60.0,
+        max_entries: int = 1024,
+        per_kind: "dict[str, float] | None" = None,
+    ) -> None:
+        if isinstance(window, bool) or not isinstance(window, (int, float)) \
+                or not math.isfinite(window) or window < 0:
+            raise ValueError("window must be a non-negative finite number")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
+        self.window = float(window)
+        self.max_entries = max_entries
+        self.per_kind = dict(per_kind or {})
+        self._last: OrderedDict[tuple[str, str], float] = OrderedDict()
+
+    def allow(self, event: dict[str, object]) -> bool:
+        """Return True the first time a (kind, ip) alert is seen inside a window."""
+        key = (str(event.get("event")), str(event.get("ip")))
+        now = float(event.get("observed_at_epoch") or 0.0)
+        last = self._last.get(key)
+        self._last[key] = now
+        self._last.move_to_end(key)
+        while len(self._last) > self.max_entries:
+            self._last.popitem(last=False)
+        kind_window = self.per_kind.get(key[0], self.window)
+        if last is not None and now - last < kind_window:
+            return False
+        return True
+
+
 class Tracker:
     """Bounded IP-to-MAC history; changes are observations, not attack verdicts."""
 

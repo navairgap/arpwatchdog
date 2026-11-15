@@ -3,6 +3,7 @@ import unittest
 from arpwatchdog import (
     SCHEMA_VERSION,
     Observation,
+    Suppressor,
     Tracker,
     canonical_ip,
     canonical_mac,
@@ -208,6 +209,35 @@ class GatewayTests(unittest.TestCase):
 
     def test_detect_default_gateways_missing_file_is_empty(self):
         self.assertEqual(detect_default_gateways("/nonexistent/route"), [])
+
+
+class SuppressorTests(unittest.TestCase):
+    @staticmethod
+    def alert(kind="mapping_changed", ip="192.0.2.10", ts=100.0):
+        return {"event": kind, "ip": ip, "observed_at_epoch": ts}
+
+    def test_repeats_inside_window_are_suppressed(self):
+        suppressor = Suppressor(window=60)
+        self.assertTrue(suppressor.allow(self.alert(ts=100)))
+        self.assertFalse(suppressor.allow(self.alert(ts=130)))
+        self.assertTrue(suppressor.allow(self.alert(ts=191)))
+
+    def test_different_kind_or_ip_are_independent(self):
+        suppressor = Suppressor(window=60)
+        self.assertTrue(suppressor.allow(self.alert(ts=100)))
+        self.assertTrue(suppressor.allow(self.alert(ts=101, kind="new_host")))
+        self.assertTrue(suppressor.allow(self.alert(ts=102, ip="192.0.2.11")))
+
+    def test_per_kind_windows_override_the_default(self):
+        suppressor = Suppressor(window=60, per_kind={"new_host": 0})
+        self.assertTrue(suppressor.allow(self.alert(kind="new_host", ts=10)))
+        self.assertTrue(suppressor.allow(self.alert(kind="new_host", ts=11)))
+
+    def test_memory_is_bounded(self):
+        suppressor = Suppressor(max_entries=2)
+        for index in range(5):
+            suppressor.allow(self.alert(ip=f"192.0.2.{index}", ts=index))
+        self.assertEqual(len(suppressor._last), 2)
 
 
 if __name__ == "__main__":
