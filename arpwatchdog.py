@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 SCHEMA_VERSION = 1
+__version__ = "1.0.0"
 
 
 def canonical_mac(mac: str) -> str:
@@ -840,7 +841,7 @@ def build_parser() -> "object":
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
                         help="export the learned table as json or csv")
-    parser.add_argument("--version", action="version", version="%(prog)s 1.0.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
 

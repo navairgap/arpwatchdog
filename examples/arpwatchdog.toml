@@ -1,0 +1,28 @@
+# arpwatchdog configuration example.
+# Keys mirror the long CLI flags; command-line flags override these values.
+
+# Capture live (requires scapy: pip install 'arpwatchdog[live]')
+# interface = "eth0"
+
+# Watch the LAN gateway; in live mode it is auto-detected if omitted.
+gateway = ["192.168.1.1"]
+
+# Never alert about lab addresses.
+ignore = ["10.10.0.0/16", "192.168.100.5"]
+
+# Baseline of known hosts in arpwatch arp.dat format (mac ip per line).
+# baseline = "/var/lib/arpwatchdog/arp.dat"
+
+# Persist learned mappings across restarts.
+# state = "/var/lib/arpwatchdog/state.json"
+
+suppress-window = 60.0
+flip-window = 300.0
+flip-changes = 3
+max-entries = 4096
+format = "json"
+# alert-file = "/var/log/arpwatchdog.log"
+# syslog = true
+# webhook = "https://alerts.example.internal/hook"
+# quiet = true
+# stats = true

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arpwatchdog"
+version = "1.0.0"
+description = "Passive ARP spoofing detector: watches IP/MAC changes, flip-flops and gateway moves without ever sending probes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "arpwatchdog contributors" }]
+keywords = ["arp", "arpwatch", "spoofing", "network-monitor", "security"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Security",
+  "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = []
+
+[project.optional-dependencies]
+live = ["scapy>=2.4"]
+dev = ["scapy>=2.4"]
+
+[project.scripts]
+arpwatchdog = "arpwatchdog:main"
+
+[tool.setuptools]
+py-modules = ["arpwatchdog"]
