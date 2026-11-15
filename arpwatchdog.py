@@ -325,17 +325,21 @@ class Suppressor:
         self._last: OrderedDict[tuple[str, str], float] = OrderedDict()
 
     def allow(self, event: dict[str, object]) -> bool:
-        """Return True the first time a (kind, ip) alert is seen inside a window."""
+        """Return True when this alert should be emitted.
+
+        Only emitted alerts restart the window. Flip-flop evidence is never
+        suppressed: it is the actionable spoofing signature and it is rare.
+        """
         key = (str(event.get("event")), str(event.get("ip")))
         now = float(event.get("observed_at_epoch") or 0.0)
+        kind_window = self.per_kind.get(key[0], self.window)
         last = self._last.get(key)
+        if last is not None and now - last < kind_window and not event.get("flip_flop"):
+            return False
         self._last[key] = now
         self._last.move_to_end(key)
         while len(self._last) > self.max_entries:
             self._last.popitem(last=False)
-        kind_window = self.per_kind.get(key[0], self.window)
-        if last is not None and now - last < kind_window:
-            return False
         return True
 
 

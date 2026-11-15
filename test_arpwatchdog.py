@@ -458,7 +458,11 @@ class CliTests(unittest.TestCase):
         ]
         code, out, _err = self.run_cli(["--suppress-window", "600"], records)
         events = [json.loads(line) for line in out.strip().splitlines()]
-        self.assertEqual([e["event"] for e in events], ["new_host", "mapping_changed"])
+        # Repeats are suppressed, but the third change is a flip-flop
+        # signature and is always emitted.
+        self.assertEqual([e["event"] for e in events],
+                         ["new_host", "mapping_changed", "mapping_changed"])
+        self.assertIsNotNone(events[-1]["flip_flop"])
 
     def test_list_prints_learned_table(self):
         records = [self.record("eth0", 1, self.MAC_A, "192.0.2.10")]
@@ -737,6 +741,103 @@ class ConfigTests(unittest.TestCase):
             code, _out, err = cli.run_cli(["--config", "/nonexistent.toml"], [])
             self.assertEqual(code, 2)
             self.assertIn("config:", err)
+        finally:
+            cli._restore()
+
+
+class ScenarioTests(unittest.TestCase):
+    """End-to-end replay of a realistic ARP spoofing incident."""
+
+    GATEWAY = "192.168.1.1"
+    ROUTER = "02:00:00:00:00:01"
+    ATTACKER = "02:00:00:00:00:aa"
+
+    def build_records(self):
+        records = []
+        # Normal traffic populates the table.
+        hosts = ("192.168.1.10", "192.168.1.20")
+        for index, host in enumerate(hosts):
+            records.append(CliTests.record(
+                "eth0", index + 1, f"02:00:00:00:00:{index + 10:02x}", host
+            ))
+        records.append(CliTests.record("eth0", 3, self.ROUTER, self.GATEWAY))
+        # Attacker poisons the gateway entry within the flip window.
+        records.append(CliTests.record("eth0", 10, self.ATTACKER, self.GATEWAY))
+        records.append(CliTests.record("eth0", 12, self.ROUTER, self.GATEWAY))
+        records.append(CliTests.record("eth0", 14, self.ATTACKER, self.GATEWAY))
+        # Repeat poisoning later: suppression should deduplicate it.
+        records.append(CliTests.record("eth0", 30, self.ROUTER, self.GATEWAY))
+        records.append(CliTests.record("eth0", 32, self.ATTACKER, self.GATEWAY))
+        # An unrelated host on an ignored range must stay silent.
+        records.append(CliTests.record("eth0", 40, "02:00:00:00:00:99", "10.10.0.7"))
+        records.append(CliTests.record("eth0", 41, "02:00:00:00:00:98", "10.10.0.7"))
+        return records
+
+    def run_scenario(self, extra_args=()):
+        cli = CliTests()
+        cli.setUp()
+        try:
+            return cli.run_cli(
+                ["--gateway", self.GATEWAY, "--ignore", "10.10.0.0/16",
+                 "--suppress-window", "60", "--flip-window", "300", *extra_args],
+                self.build_records(),
+            )
+        finally:
+            cli._restore()
+
+    def test_attack_sequence_produces_ordered_events(self):
+        code, out, _err = self.run_scenario()
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in out.strip().splitlines()]
+        kinds = [(event["event"], event["ip"]) for event in events]
+        # new hosts; poisoning at t=10; the t=14 flip back is the third change
+        # in the window, so it carries flip_flop and bypasses suppression;
+        # repeats at t=12/30/32 are suppressed; the ignored range stays silent.
+        self.assertEqual(kinds, [
+            ("new_host", "192.168.1.10"),
+            ("new_host", "192.168.1.20"),
+            ("new_host", self.GATEWAY),
+            ("gateway_mac_changed", self.GATEWAY),
+            ("gateway_mac_changed", self.GATEWAY),
+        ])
+        poisoning = events[3]
+        self.assertEqual(poisoning["previous_mac"], self.ROUTER)
+        self.assertEqual(poisoning["current_mac"], self.ATTACKER)
+        self.assertEqual(poisoning["severity"], "critical")
+        poisoning_flip = events[4]
+        self.assertEqual(poisoning_flip["current_mac"], self.ATTACKER)
+        self.assertEqual(poisoning_flip["severity"], "critical")
+        self.assertIsNotNone(poisoning_flip["flip_flop"])
+        self.assertEqual(poisoning_flip["flip_flop"]["macs"],
+                         {self.ATTACKER: 2, self.ROUTER: 1})
+
+    def test_stats_summarize_the_incident(self):
+        code, _out, err = self.run_scenario(["--stats"])
+        self.assertEqual(code, 0)
+        self.assertIn("arp_observations=10", err)
+        self.assertIn("ignored_by_filter=2", err)
+        self.assertIn("suppressed=3", err)
+
+    def test_state_survives_restart_and_stays_quiet(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        state_path = os.path.join(workdir.name, "state.json")
+        cli = CliTests()
+        cli.setUp()
+        try:
+            cli.run_cli(
+                ["--gateway", self.GATEWAY, "--state", state_path, "--no-suppress"],
+                self.build_records(),
+            )
+            # Restart: the learned state holds the last MAC per address, so a
+            # repeat of the same claim does not alert again.
+            code, out, _err = cli.run_cli(
+                ["--gateway", self.GATEWAY, "--state", state_path],
+                [CliTests.record("eth0", 50, self.ATTACKER, self.GATEWAY)],
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "")
         finally:
             cli._restore()
 
