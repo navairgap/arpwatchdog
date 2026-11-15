@@ -26,7 +26,6 @@ from arpwatchdog import (
     parse_frame,
     save_baseline,
     severity_for,
-    Stats,
     save_state,
     rfc3339,
 )
