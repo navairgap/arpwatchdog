@@ -682,5 +682,65 @@ class SeverityTests(unittest.TestCase):
             cli._restore()
 
 
+class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "arpwatchdog.toml")
+
+    def write(self, text):
+        with open(self.path, "w") as handle:
+            handle.write(text)
+
+    def test_config_values_become_defaults(self):
+        self.write('no-new-hosts = true\nsuppress-window = 5.0\n')
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, _err = cli.run_cli(["--config", self.path], records)
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "")
+        finally:
+            cli._restore()
+
+    def test_cli_flags_override_config(self):
+        self.write('format = "text"\n')
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, _err = cli.run_cli(
+                ["--config", self.path, "--format", "json"], records
+            )
+            event = json.loads(out.strip())
+            self.assertEqual(code, 0)
+            self.assertEqual(event["event"], "new_host")
+        finally:
+            cli._restore()
+
+    def test_unknown_key_is_rejected(self):
+        self.write('spearphishing = true\n')
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, _out, err = cli.run_cli(["--config", self.path], [])
+            self.assertEqual(code, 2)
+            self.assertIn("unknown configuration key", err)
+        finally:
+            cli._restore()
+
+    def test_missing_config_file_is_an_error(self):
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, _out, err = cli.run_cli(["--config", "/nonexistent.toml"], [])
+            self.assertEqual(code, 2)
+            self.assertIn("config:", err)
+        finally:
+            cli._restore()
+
+
 if __name__ == "__main__":
     unittest.main()

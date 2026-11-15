@@ -763,6 +763,32 @@ def _print_event(event: "dict") -> None:
     print(json.dumps(event, sort_keys=True))
 
 
+CONFIG_KEYS = frozenset({
+    "interface", "replay", "baseline", "state", "gateway", "ignore",
+    "no-new-hosts", "no-suppress", "suppress-window", "flip-window",
+    "flip-changes", "max-entries", "format", "alert-file", "syslog",
+    "webhook", "quiet", "stats",
+})
+CONFIG_ALIASES = {"gateways": "gateway"}
+
+
+def load_config(path: str) -> "dict[str, object]":
+    """Load a TOML config; recognized keys become CLI defaults."""
+    import tomllib
+
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+    if "arpwatchdog" in data and isinstance(data["arpwatchdog"], dict):
+        data = data["arpwatchdog"]
+    resolved: dict[str, object] = {}
+    for key, value in data.items():
+        key = CONFIG_ALIASES.get(key, key)
+        if key not in CONFIG_KEYS:
+            raise ValueError(f"unknown configuration key: {key!r}")
+        resolved[key.replace("-", "_")] = value
+    return resolved
+
+
 def build_parser() -> "object":
     import argparse
 
@@ -807,6 +833,9 @@ def build_parser() -> "object":
                         help="do not print alerts to stdout")
     parser.add_argument("--stats", action="store_true",
                         help="print a run summary to stderr when processing ends")
+    parser.add_argument("--config", metavar="FILE.toml",
+                        help="read default options from a TOML file; "
+                             "command-line flags override it")
     parser.add_argument("--list", action="store_true",
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
@@ -818,6 +847,13 @@ def build_parser() -> "object":
 def main(argv: "list[str] | None" = None) -> int:
     parser = build_parser()
     options = parser.parse_args(argv)
+    if options.config:
+        try:
+            parser.set_defaults(**load_config(options.config))
+        except (OSError, ValueError) as exc:
+            print(f"arpwatchdog: config: {exc}", file=sys.stderr)
+            return 2
+        options = parser.parse_args(argv)
 
     try:
         tracker = Tracker(
