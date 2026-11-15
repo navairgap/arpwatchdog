@@ -136,15 +136,18 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
 class Tracker:
     """Bounded IP-to-MAC history; changes are observations, not attack verdicts."""
 
-    def __init__(self, max_entries: int = 4096) -> None:
+    def __init__(self, max_entries: int = 4096, report_new_hosts: bool = True) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
         self.max_entries = max_entries
+        self.report_new_hosts = report_new_hosts
         self._seen: OrderedDict[str, Observation] = OrderedDict()
 
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
-            item.interface, item.timestamp, canonical_ip(item.ip), canonical_mac(item.mac)
+            item.interface, item.timestamp, canonical_ip(item.ip), canonical_mac(item.mac),
+            operation=item.operation, kind=item.kind,
+            target_ip=item.target_ip, target_mac=item.target_mac,
         )
         previous = self._seen.get(item.ip)
         self._seen[item.ip] = item
@@ -152,6 +155,18 @@ class Tracker:
         while len(self._seen) > self.max_entries:
             self._seen.popitem(last=False)
         if previous is None:
+            if self.report_new_hosts:
+                return make_event(
+                    "new_host",
+                    ip=item.ip,
+                    mac=item.mac,
+                    interface=item.interface,
+                    packet_kind=item.kind,
+                    observed_at=rfc3339(item.timestamp),
+                    observed_at_epoch=item.timestamp,
+                    assessment="first observation of this address; normal on startup "
+                               "or after a baseline reset",
+                )
             return None
         if previous.mac == item.mac:
             return None

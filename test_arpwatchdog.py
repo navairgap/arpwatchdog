@@ -102,20 +102,26 @@ class CanonicalizationTests(unittest.TestCase):
 
 
 class TrackerTests(unittest.TestCase):
-    def test_only_emits_an_event_when_a_mac_changes(self):
+    def test_reports_new_host_then_change(self):
         tracker = Tracker()
         first = Observation("eth0", 1, "192.0.2.10", "02:00:00:00:00:01")
         same = Observation("eth0", 2, "192.0.2.10", "02:00:00:00:00:01")
         changed = Observation("wlan0", 3, "192.0.2.10", "02:00:00:00:00:02")
-        self.assertIsNone(tracker.observe(first))
+        new_host = tracker.observe(first)
+        self.assertEqual(new_host["event"], "new_host")
+        self.assertEqual(new_host["ip"], "192.0.2.10")
         self.assertIsNone(tracker.observe(same))
         event = tracker.observe(changed)
         self.assertEqual(event["event"], "mapping_changed")
         self.assertEqual(event["previous_interface"], "eth0")
         self.assertIn("not proof", event["assessment"])
 
+    def test_new_hosts_can_be_disabled(self):
+        tracker = Tracker(report_new_hosts=False)
+        self.assertIsNone(tracker.observe(Observation("eth0", 1, "192.0.2.10", "02:00:00:00:00:01")))
+
     def test_history_is_bounded(self):
-        tracker = Tracker(max_entries=2)
+        tracker = Tracker(max_entries=2, report_new_hosts=False)
         for index in range(3):
             tracker.observe(Observation("eth0", index, f"192.0.2.{index + 1}", "02:00:00:00:00:01"))
         self.assertEqual(len(tracker._seen), 2)
