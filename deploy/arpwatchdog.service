@@ -1,0 +1,31 @@
+[Unit]
+Description=arpwatchdog passive ARP spoofing detector
+Documentation=https://github.com/navairgap/arpwatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# DynamicUser keeps the process unprivileged; AmbientColors=cap_net_raw is
+# the only capability needed for passive capture.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/arpwatchdog
+StateDirectory=arpwatchdog
+ExecStart=/usr/bin/env arpwatchdog \
+    --interface eth0 \
+    --state /var/lib/arpwatchdog/state.json \
+    --baseline /var/lib/arpwatchdog/arp.dat \
+    --syslog \
+    --quiet \
+    --stats
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
