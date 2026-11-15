@@ -571,6 +571,92 @@ def make_sink(format_name: str, stream: "object" = None) -> "callable":
     return sink
 
 
+class FileSink:
+    """Append formatted alerts to a file, one event per line."""
+
+    def __init__(self, path: str, format_name: str = "json") -> None:
+        formatters = {
+            "json": lambda event: json.dumps(event, sort_keys=True) + "\n",
+            "text": lambda event: format_event_text(event) + "\n",
+            "csv": lambda event: format_event_csv(event) + "\n",
+        }
+        if format_name not in formatters:
+            raise ValueError(f"unknown alert-file format: {format_name}")
+        self._render = formatters[format_name]
+        self._stream = open(path, "a", encoding="utf-8")
+
+    def __call__(self, event: "dict") -> None:
+        self._stream.write(self._render(event))
+        self._stream.flush()
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+class SyslogSink:
+    """Emit alerts to the system logger with event-specific priorities."""
+
+    PRIORITY_BY_EVENT = {
+        "new_host": 4,              # LOG_WARNING
+        "mapping_changed": 4,       # LOG_WARNING
+        "gateway_mac_changed": 2,   # LOG_CRIT
+        "flip_flop": 2,             # LOG_CRIT
+    }
+
+    def __init__(self, ident: str = "arpwatchdog") -> None:
+        import syslog as _syslog
+        self._syslog = _syslog
+        self._syslog.openlog(ident)
+
+    def __call__(self, event: "dict") -> None:
+        priority = self.PRIORITY_BY_EVENT.get(str(event.get("event")), 5)  # 5=LOG_NOTICE
+        self._syslog.syslog(priority, format_event_text(event))
+
+
+class WebhookSink:
+    """POST each alert as JSON to an HTTPS/HTTP endpoint; failures never raise."""
+
+    def __init__(self, url: str, timeout: float = 5.0) -> None:
+        if not url.lower().startswith(("http://", "https://")):
+            raise ValueError("webhook URL must start with http:// or https://")
+        self.url = url
+        self.timeout = timeout
+        self.failures = 0
+        self.delivered = 0
+
+    def __call__(self, event: "dict") -> None:
+        import urllib.request
+        payload = json.dumps(event, sort_keys=True).encode("utf-8")
+        request = urllib.request.Request(
+            self.url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                if 200 <= response.status < 300:
+                    self.delivered += 1
+                else:
+                    self.failures += 1
+        except OSError as exc:
+            self.failures += 1
+            print(f"arpwatchdog: webhook delivery failed: {exc}", file=sys.stderr)
+
+
+def _print_event(event: "dict") -> None:
+    print(json.dumps(event, sort_keys=True))
+
+
+def multi_sink(*sinks: "callable") -> "callable":
+    """Dispatch one event to every configured sink."""
+
+    def sink(event: "dict") -> None:
+        for target in sinks:
+            target(event)
+
+    return sink
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -663,6 +749,14 @@ def build_parser() -> "object":
                         help="maximum tracked IP addresses (default 4096)")
     parser.add_argument("--format", choices=("json", "text", "csv"), default="json",
                         help="alert output format (default json)")
+    parser.add_argument("--alert-file", metavar="FILE",
+                        help="also append alerts to FILE")
+    parser.add_argument("--syslog", action="store_true",
+                        help="also send alerts to the system logger")
+    parser.add_argument("--webhook", metavar="URL",
+                        help="also POST JSON alerts to this URL")
+    parser.add_argument("--quiet", action="store_true",
+                        help="do not print alerts to stdout")
     parser.add_argument("--list", action="store_true",
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
@@ -700,9 +794,19 @@ def main(argv: "list[str] | None" = None) -> int:
             tracker.set_gateways(gateways)
         suppressor = None if options.no_suppress else Suppressor(options.suppress_window)
         ip_filter = IpFilter(options.ignore)
+        sinks: "list[callable]" = []
+        if not options.quiet:
+            sinks.append(make_sink(options.format))
+        if options.alert_file:
+            file_sink = FileSink(options.alert_file, options.format)
+            sinks.append(file_sink)
+        if options.syslog:
+            sinks.append(SyslogSink())
+        if options.webhook:
+            sinks.append(WebhookSink(options.webhook))
         monitor = Monitor(
             tracker, suppressor=suppressor, ip_filter=ip_filter,
-            sink=make_sink(options.format),
+            sink=multi_sink(*sinks),
         )
     except ValueError as exc:
         print(f"arpwatchdog: {exc}", file=sys.stderr)

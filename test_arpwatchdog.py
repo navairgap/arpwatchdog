@@ -4,7 +4,10 @@ import unittest
 
 from arpwatchdog import (
     SCHEMA_VERSION,
+    FileSink,
     IpFilter,
+    SyslogSink,
+    WebhookSink,
     main,
     Observation,
     ScapySource,
@@ -532,6 +535,75 @@ class OutputFormatTests(unittest.TestCase):
     def test_unknown_format_rejected(self):
         with self.assertRaises(ValueError):
             make_sink("yaml")
+
+
+class AlertSinkTests(unittest.TestCase):
+    def test_file_sink_appends_events(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        path = os.path.join(workdir.name, "alerts.log")
+        sink = FileSink(path, "text")
+        sink({"event": "new_host", "ip": "192.0.2.9", "observed_at": "t1"})
+        sink.close()
+        with open(path) as handle:
+            lines = handle.read().strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("NEW_HOST", lines[0])
+
+    def test_syslog_sink_uses_event_priority(self):
+        import types
+        calls = []
+        fake_syslog = types.SimpleNamespace(
+            openlog=lambda ident: calls.append(("open", ident)),
+            syslog=lambda priority, message: calls.append((priority, message)),
+        )
+        sink = SyslogSink.__new__(SyslogSink)
+        sink._syslog = fake_syslog
+        sink({"event": "gateway_mac_changed", "ip": "192.0.2.1"})
+        sink({"event": "new_host", "ip": "192.0.2.9"})
+        priorities = [priority for priority, _message in calls if priority != "open"]
+        self.assertEqual(priorities, [2, 4])
+
+    def test_webhook_sink_posts_json(self):
+        import types
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+        posted = {}
+        def fake_urlopen(request, timeout):
+            posted["url"] = request.full_url
+            posted["data"] = request.data
+            return FakeResponse()
+        import urllib.request
+        sink = WebhookSink("https://example.internal/hook")
+        saved = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            sink({"event": "mapping_changed", "ip": "192.0.2.5"})
+        finally:
+            urllib.request.urlopen = saved
+        self.assertEqual(sink.delivered, 1)
+        self.assertEqual(sink.failures, 0)
+        self.assertEqual(json.loads(posted["data"])["event"], "mapping_changed")
+
+    def test_webhook_sink_counts_failures_without_raising(self):
+        import urllib.request
+        def fake_urlopen(request, timeout):
+            raise OSError("connection refused")
+        sink = WebhookSink("https://example.internal/hook")
+        saved = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            sink({"event": "new_host", "ip": "192.0.2.5"})
+        finally:
+            urllib.request.urlopen = saved
+        self.assertEqual(sink.failures, 1)
+
+    def test_webhook_rejects_non_http_url(self):
+        with self.assertRaises(ValueError):
+            WebhookSink("ftp://example.internal/hook")
 
 
 if __name__ == "__main__":
