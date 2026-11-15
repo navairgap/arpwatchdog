@@ -11,17 +11,19 @@ from arpwatchdog import (
 )
 
 
-def arp_frame(sender_mac, sender_ip, vlan=False):
+def arp_frame(sender_mac, sender_ip, vlan=False, gratuitous=False, request=False):
     mac = bytes.fromhex(sender_mac.replace(":", ""))
     ip = bytes(int(part) for part in sender_ip.split("."))
+    target_ip = ip if gratuitous else bytes((192, 0, 2, 1))
     ethernet = b"\x00" * 6 + b"\x00" * 6
     if vlan:
         ethernet += b"\x81\x00\x00\x07\x08\x06"
     else:
         ethernet += b"\x08\x06"
+    operation = b"\x00\x01" if request else b"\x00\x02"
     payload = (
-        b"\x00\x01" + b"\x08\x00" + b"\x06\x04" + b"\x00\x02"
-        + mac + ip + b"\x00" * 6 + bytes((192, 0, 2, 1))
+        b"\x00\x01" + b"\x08\x00" + b"\x06\x04" + operation
+        + mac + ip + b"\x00" * 6 + target_ip
     )
     return ethernet + payload
 
@@ -32,7 +34,21 @@ class ArpParserTests(unittest.TestCase):
             arp_frame("02:00:00:00:00:01", "192.0.2.10"),
             "eth0", 10.0,
         )
-        self.assertEqual(item, Observation("eth0", 10.0, "192.0.2.10", "02:00:00:00:00:01"))
+        self.assertEqual(item.interface, "eth0")
+        self.assertEqual(item.timestamp, 10.0)
+        self.assertEqual(item.ip, "192.0.2.10")
+        self.assertEqual(item.mac, "02:00:00:00:00:01")
+        self.assertEqual(item.kind, "arp_reply")
+        self.assertEqual(item.operation, 2)
+        self.assertEqual(item.target_ip, "192.0.2.1")
+
+    def test_classifies_gratuitous_announcements(self):
+        item = parse_frame(
+            arp_frame("02:00:00:00:00:07", "192.0.2.7", gratuitous=True),
+            "eth0", 12,
+        )
+        self.assertEqual(item.kind, "gratuitous_arp")
+        self.assertEqual(item.target_ip, "192.0.2.7")
 
     def test_parses_single_vlan_tag(self):
         item = parse_frame(

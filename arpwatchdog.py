@@ -69,6 +69,10 @@ class Observation:
     timestamp: float
     ip: str
     mac: str
+    operation: int = 2
+    kind: str = "arp_reply"
+    target_ip: str = ""
+    target_mac: str = ""
 
 
 def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation | None:
@@ -110,10 +114,23 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
 
     sender_mac = ":".join(f"{byte:02x}" for byte in arp[8:14])
     sender_ip = ".".join(str(byte) for byte in arp[14:18])
+    target_mac = ":".join(f"{byte:02x}" for byte in arp[18:24])
+    target_ip = ".".join(str(byte) for byte in arp[24:28])
     # RFC 5227 address probes use 0.0.0.0 and do not claim ownership.
     if sender_ip == "0.0.0.0":
         return None
-    return Observation(interface, float(timestamp), sender_ip, sender_mac)
+    # RFC 5227 section 3: announcements repeat the sender address in the
+    # target fields; spoofing tools and address changes both use them.
+    if sender_ip == target_ip:
+        kind = "gratuitous_arp"
+    elif operation == 2:
+        kind = "arp_reply"
+    else:
+        kind = "arp_request"
+    return Observation(
+        interface, float(timestamp), sender_ip, sender_mac,
+        operation=operation, kind=kind, target_ip=target_ip, target_mac=target_mac,
+    )
 
 
 class Tracker:
