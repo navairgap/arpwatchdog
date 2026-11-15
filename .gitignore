@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 .env
 .pytest_cache/
+.v2c/
+.video_agent/
+*.state.json
 dist/
 build/
 *.egg-info/
