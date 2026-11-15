@@ -657,6 +657,37 @@ def multi_sink(*sinks: "callable") -> "callable":
     return sink
 
 
+class Stats:
+    """Bounded counters describing one monitor run."""
+
+    def __init__(self) -> None:
+        self.records = 0
+        self.non_arp = 0
+        self.arp_observations = 0
+        self.malformed = 0
+        self.alerts: "dict[str, int]" = {}
+        self.suppressed = 0
+        self.ignored_by_filter = 0
+
+    def count_alert(self, kind: str) -> None:
+        self.alerts[kind] = self.alerts.get(kind, 0) + 1
+
+    def summary(self) -> "dict[str, object]":
+        return {
+            "records_read": self.records,
+            "arp_observations": self.arp_observations,
+            "non_arp_frames": self.non_arp,
+            "malformed": self.malformed,
+            "alerts": dict(sorted(self.alerts.items())),
+            "suppressed": self.suppressed,
+            "ignored_by_filter": self.ignored_by_filter,
+        }
+
+    def line(self) -> str:
+        parts = [f"{name}={value}" for name, value in self.summary().items()]
+        return "stats: " + " ".join(parts)
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -666,23 +697,27 @@ class Monitor:
         suppressor: "Suppressor | None" = None,
         ip_filter: "IpFilter | None" = None,
         sink: "callable | None" = None,
+        stats: "Stats | None" = None,
     ) -> None:
         self.tracker = tracker
         self.suppressor = suppressor
         self.ip_filter = ip_filter
         self.sink = sink or _print_event
-        self.observations_seen = 0
+        self.stats = stats or Stats()
 
     def handle_observation(self, item: Observation) -> "dict | None":
         """Run one observation through detections and the alert pipeline."""
-        self.observations_seen += 1
+        self.stats.arp_observations += 1
         event = self.tracker.observe(item)
         if event is None:
             return None
         if self.ip_filter is not None and self.ip_filter.matches(str(event["ip"])):
+            self.stats.ignored_by_filter += 1
             return None
         if self.suppressor is not None and not self.suppressor.allow(event):
+            self.stats.suppressed += 1
             return None
+        self.stats.count_alert(str(event.get("event")))
         self.sink(event)
         return event
 
@@ -690,14 +725,18 @@ class Monitor:
         """Read JSONL records with interface, timestamp and frame_hex."""
         problems = 0
         for line_number, line in enumerate(stream, 1):
+            self.stats.records += 1
             try:
                 record = json.loads(line)
                 frame = bytes.fromhex(record["frame_hex"])
                 item = parse_frame(frame, record["interface"], record["timestamp"])
-                if item is not None:
+                if item is None:
+                    self.stats.non_arp += 1
+                else:
                     self.handle_observation(item)
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 problems += 1
+                self.stats.malformed += 1
                 print(f"arpwatchdog: line {line_number}: {exc}", file=sys.stderr)
         return problems
 
@@ -757,6 +796,8 @@ def build_parser() -> "object":
                         help="also POST JSON alerts to this URL")
     parser.add_argument("--quiet", action="store_true",
                         help="do not print alerts to stdout")
+    parser.add_argument("--stats", action="store_true",
+                        help="print a run summary to stderr when processing ends")
     parser.add_argument("--list", action="store_true",
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
@@ -806,7 +847,7 @@ def main(argv: "list[str] | None" = None) -> int:
             sinks.append(WebhookSink(options.webhook))
         monitor = Monitor(
             tracker, suppressor=suppressor, ip_filter=ip_filter,
-            sink=multi_sink(*sinks),
+            sink=multi_sink(*sinks), stats=Stats(),
         )
     except ValueError as exc:
         print(f"arpwatchdog: {exc}", file=sys.stderr)
@@ -830,6 +871,9 @@ def main(argv: "list[str] | None" = None) -> int:
                 stream.close()
         if problems:
             print(f"arpwatchdog: {problems} malformed input line(s)", file=sys.stderr)
+
+    if options.stats:
+        print(monitor.stats.line(), file=sys.stderr)
 
     if options.state:
         save_state(options.state, tracker.export_baseline(), tracker.gateways)

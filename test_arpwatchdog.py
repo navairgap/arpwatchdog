@@ -21,9 +21,11 @@ from arpwatchdog import (
     load_baseline,
     load_state,
     make_sink,
+    Monitor,
     observation_from_scapy_packet,
     parse_frame,
     save_baseline,
+    Stats,
     save_state,
     rfc3339,
 )
@@ -604,6 +606,43 @@ class AlertSinkTests(unittest.TestCase):
     def test_webhook_rejects_non_http_url(self):
         with self.assertRaises(ValueError):
             WebhookSink("ftp://example.internal/hook")
+
+
+class StatsTests(unittest.TestCase):
+    def test_counters_track_a_full_run(self):
+        import io as _io
+        records = [
+            CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10"),
+            CliTests.record("eth0", 2, "02:00:00:00:00:02", "192.0.2.10"),
+            CliTests.record("eth0", 3, "02:00:00:00:00:03", "192.0.2.10"),
+            json.dumps({"interface": "eth0", "timestamp": 4,
+                        "frame_hex": (b"\x00" * 12 + b"\x08\x00" + b"\x00" * 50).hex()}),
+            "not json",
+        ]
+        monitor = Monitor(Tracker(report_new_hosts=False))
+        problems = monitor.run_jsonl(_io.StringIO("\n".join(records) + "\n"))
+        self.assertEqual(problems, 1)
+        summary = monitor.stats.summary()
+        self.assertEqual(summary["records_read"], 5)
+        self.assertEqual(summary["arp_observations"], 3)
+        self.assertEqual(summary["non_arp_frames"], 1)
+        self.assertEqual(summary["malformed"], 1)
+        self.assertEqual(summary["alerts"], {"mapping_changed": 2})
+
+    def test_stats_flag_prints_summary_to_stderr(self):
+        import io as _io
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        saved_in, saved_err = sys.stdin, sys.stderr
+        sys.stdin = _io.StringIO("\n".join(records) + "\n")
+        captured_err = _io.StringIO()
+        sys.stderr = captured_err
+        try:
+            code = main(["--stats"])
+        finally:
+            sys.stdin, sys.stderr = saved_in, saved_err
+        self.assertEqual(code, 0)
+        self.assertIn("stats:", captured_err.getvalue())
+        self.assertIn("arp_observations=1", captured_err.getvalue())
 
 
 if __name__ == "__main__":
