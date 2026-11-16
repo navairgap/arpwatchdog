@@ -470,6 +470,7 @@ class Tracker:
             return None
         self._record_change(item)
         flip_flop = self._detect_flip_flop(item)
+        conflict = self._detect_conflict(item)
         kind = "gateway_mac_changed" if item.ip in self.gateways else "mapping_changed"
         assessment = (
             "a gateway MAC change is the classic ARP spoofing indicator; verify the "
@@ -489,11 +490,12 @@ class Tracker:
             observed_at=rfc3339(item.timestamp),
             observed_at_epoch=item.timestamp,
             flip_flop=flip_flop,
+            ip_conflict=conflict,
             assessment=assessment,
         )
 
     def _record_change(self, item: Observation) -> None:
-        """Remember one MAC transition for the flip-flop detector."""
+        """Remember one MAC transition for the flip-flop and conflict detectors."""
         history = self._changes.get(item.ip)
         if history is None:
             history = []
@@ -503,6 +505,25 @@ class Tracker:
             (ts, mac) for ts, mac in history
             if ts >= item.timestamp - self.flip_flop_window
         ]
+
+    def _detect_conflict(self, item: Observation) -> "dict[str, object] | None":
+        """Flag a second MAC claiming the same address inside the flip window.
+
+        One MAC change can be a normal replacement; a second different MAC
+        inside the window means two devices are actively claiming the address.
+        """
+        history = self._changes.get(item.ip, [])
+        older = history[:-1] if history else []
+        if not older:
+            return None
+        macs = [mac for _, mac in older if mac != item.mac]
+        if not macs:
+            return None
+        return {
+            "macs": sorted(set(macs) | {item.mac}),
+            "note": "more than one hardware address claimed this IP inside the "
+                    "conflict window; two devices are using the same address",
+        }
 
     def _detect_flip_flop(self, item: Observation) -> dict[str, object] | None:
         """Flag rapid alternation between MACs for one address within a window."""

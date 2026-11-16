@@ -842,5 +842,39 @@ class ScenarioTests(unittest.TestCase):
             cli._restore()
 
 
+class ConflictTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+
+    def feed(self, tracker, sequence):
+        events = []
+        for ts, mac in sequence:
+            event = tracker.observe(Observation("eth0", ts, "192.0.2.10", mac))
+            if event and event["event"] not in ("new_host",):
+                events.append(event)
+        return events
+
+    def test_second_different_mac_flags_conflict(self):
+        tracker = Tracker(report_new_hosts=False)
+        events = self.feed(tracker, [(10, self.MAC_A), (20, self.MAC_B), (30, self.MAC_A)])
+        self.assertIsNone(events[0].get("ip_conflict"))
+        conflict = events[1]["ip_conflict"]
+        self.assertEqual(conflict["macs"], sorted({self.MAC_A, self.MAC_B}))
+        self.assertIn("two devices", conflict["note"])
+
+    def test_single_change_has_no_conflict(self):
+        tracker = Tracker(report_new_hosts=False)
+        events = self.feed(tracker, [(10, self.MAC_A), (20, self.MAC_B)])
+        self.assertIsNone(events[0].get("ip_conflict"))
+
+    def test_conflict_clears_outside_window(self):
+        tracker = Tracker(report_new_hosts=False, flip_flop_window=10)
+        events = self.feed(tracker, [(0, self.MAC_A), (100, self.MAC_B), (200, self.MAC_A)])
+        # Only the two post-first-seen changes produce events.
+        self.assertEqual(len(events), 2)
+        self.assertIsNone(events[0].get("ip_conflict"))
+        self.assertIsNone(events[1].get("ip_conflict"))
+
+
 if __name__ == "__main__":
     unittest.main()
