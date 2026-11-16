@@ -952,6 +952,52 @@ def save_metrics(path: str, stats: "Stats", tracked_hosts: int) -> None:
     os.replace(tmp_path, path)
 
 
+class MetricsServer:
+    """Serve the current metrics snapshot over HTTP (opt-in, local)."""
+
+    def __init__(self, provider: "callable", host: str = "127.0.0.1", port: int = 9835) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path not in ("/metrics", "/"):
+                    self.send_error(404)
+                    return
+                body = outer._provider().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                pass
+
+        self._provider = provider
+        self._threading = threading
+        self._server = ThreadingHTTPServer((host, port), Handler)
+        self._thread = None
+
+    @property
+    def port(self) -> int:
+        return self._server.server_address[1]
+
+    def start(self) -> None:
+        self._thread = self._threading.Thread(
+            target=self._server.serve_forever, daemon=True
+        )
+        self._thread.start()
+
+    def shutdown(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
 class StopFlag:
     """A simple cooperative stop request shared with signal handlers."""
 
@@ -1112,6 +1158,9 @@ def build_parser() -> "object":
                         help="print a run summary to stderr when processing ends")
     parser.add_argument("--metrics-file", metavar="PATH",
                         help="write Prometheus metrics to PATH when processing ends")
+    parser.add_argument("--metrics-serve", metavar="[HOST:]PORT",
+                        help="serve metrics over HTTP on this address "
+                             "(default host 127.0.0.1; only scrape from trusted networks)")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1177,6 +1226,21 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"arpwatchdog: {exc}", file=sys.stderr)
         return 2
 
+    metrics_server = None
+    if options.metrics_serve:
+        host, _, port_text = options.metrics_serve.partition(":")
+        if not port_text:
+            host, port_text = "127.0.0.1", host
+        try:
+            metrics_server = MetricsServer(
+                lambda: render_metrics(monitor.stats, len(tracker.export_baseline())),
+                host=host or "127.0.0.1", port=int(port_text),
+            )
+            metrics_server.start()
+        except (OSError, ValueError) as exc:
+            print(f"arpwatchdog: metrics server: {exc}", file=sys.stderr)
+            return 2
+
     if options.interface:
         import signal
         stop = StopFlag()
@@ -1206,6 +1270,8 @@ def main(argv: "list[str] | None" = None) -> int:
         if problems:
             print(f"arpwatchdog: {problems} malformed input line(s)", file=sys.stderr)
 
+    if metrics_server is not None:
+        metrics_server.shutdown()
     if options.stats:
         print(monitor.stats.line(), file=sys.stderr)
     if options.metrics_file:

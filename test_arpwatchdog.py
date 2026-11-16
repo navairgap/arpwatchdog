@@ -11,6 +11,7 @@ from arpwatchdog import (
     canonical_address,
     ip_sort_key,
     main,
+    MetricsServer,
     vendor_for,
     Observation,
     ScapySource,
@@ -1160,6 +1161,29 @@ class MetricsTests(unittest.TestCase):
         save_metrics(path, Stats(), 0)
         self.assertFalse(os.path.exists(path + ".tmp"))
         self.assertTrue(os.path.exists(path))
+
+
+class MetricsServerTests(unittest.TestCase):
+    def test_serves_snapshot_and_returns_404_elsewhere(self):
+        import urllib.request
+        import urllib.error
+        snapshot = "arpwatchdog_tracked_hosts 3\n"
+        server = MetricsServer(lambda: snapshot, port=0)
+        server.start()
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            with urllib.request.urlopen(base + "/metrics", timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read().decode(), snapshot)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(base + "/nope", timeout=5)
+            self.assertEqual(ctx.exception.code, 404)
+        finally:
+            server.shutdown()
+
+    def test_refuses_invalid_bind_address(self):
+        with self.assertRaises(Exception):
+            MetricsServer(lambda: "", host="256.256.256.256")
 
 
 if __name__ == "__main__":
