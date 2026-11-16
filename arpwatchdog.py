@@ -114,6 +114,36 @@ class Observation:
     target_mac: str = ""
 
 
+# Small offline OUI table for well-known vendors (mostly virtualization, whose
+# MACs are worth flagging when they claim physical-network identities).
+VENDOR_OUIS = {
+    "00:00:0c": "Cisco",
+    "00:05:69": "VMware",
+    "00:0c:29": "VMware",
+    "00:1c:42": "Parallels",
+    "00:15:5d": "Microsoft Hyper-V",
+    "00:50:56": "VMware",
+    "00:e0:4c": "Realtek",
+    "08:00:27": "VirtualBox",
+    "3c:5a:b4": "Google",
+    "52:54:00": "QEMU/KVM",
+    "ac:de:48": "Apple",
+    "b8:27:eb": "Raspberry Pi",
+    "dc:a6:32": "Raspberry Pi",
+    "e4:5f:01": "Raspberry Pi",
+    "f8:bc:12": "Raspberry Pi",
+}
+
+
+def vendor_for(mac: str) -> "str | None":
+    """Return the vendor for a MAC's OUI, or None when unknown."""
+    try:
+        canonical = canonical_mac(mac)
+    except ValueError:
+        return None
+    return VENDOR_OUIS.get(canonical[:8])
+
+
 def classify_arp(sender_ip: str, target_ip: str, operation: int) -> str:
     """Name the packet kind; announcements repeat the sender address (RFC 5227)."""
     if sender_ip == target_ip:
@@ -589,6 +619,7 @@ class Tracker:
                     "new_host",
                     ip=item.ip,
                     mac=item.mac,
+                    vendor=vendor_for(item.mac),
                     interface=item.interface,
                     packet_kind=item.kind,
                     gateway=item.ip in self.gateways,
@@ -619,6 +650,7 @@ class Tracker:
             ip=item.ip,
             previous_mac=previous.mac,
             current_mac=item.mac,
+            vendor=vendor_for(item.mac),
             previous_interface=previous.interface,
             interface=item.interface,
             first_seen=rfc3339(previous.timestamp),

@@ -11,6 +11,7 @@ from arpwatchdog import (
     canonical_address,
     ip_sort_key,
     main,
+    vendor_for,
     Observation,
     ScapySource,
     Suppressor,
@@ -1047,6 +1048,21 @@ class DhcpTests(unittest.TestCase):
         event = tracker.observe(Observation("eth0", 5, "192.0.2.50", "02:00:00:00:00:33",
                                             operation=0, kind="dhcp_ack"))
         self.assertEqual(event["packet_kind"], "dhcp_ack")
+
+
+class VendorTests(unittest.TestCase):
+    def test_known_ouis_resolve(self):
+        self.assertEqual(vendor_for("52:54:00:12:34:56"), "QEMU/KVM")
+        self.assertEqual(vendor_for("B8:27:EB:11:22:33"), "Raspberry Pi")
+        self.assertIsNone(vendor_for("02:00:00:00:00:01"))
+        self.assertIsNone(vendor_for("not-a-mac"))
+
+    def test_events_carry_vendor_when_known(self):
+        tracker = Tracker(report_new_hosts=True)
+        event = tracker.observe(Observation("eth0", 1, "192.0.2.10", "52:54:00:aa:bb:cc"))
+        self.assertEqual(event["vendor"], "QEMU/KVM")
+        event = tracker.observe(Observation("eth0", 2, "192.0.2.10", "02:00:00:00:00:01"))
+        self.assertIsNone(event["vendor"])
 
 
 if __name__ == "__main__":
