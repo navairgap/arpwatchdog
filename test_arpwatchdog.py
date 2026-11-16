@@ -1265,5 +1265,37 @@ class InventoryReportTests(unittest.TestCase):
             cli._restore()
 
 
+class FailOnTests(unittest.TestCase):
+    def test_exit_three_on_critical_gateway_change(self):
+        records = [
+            CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.1"),
+            CliTests.record("eth0", 2, "02:00:00:00:00:02", "192.0.2.1"),
+        ]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, err = cli.run_cli(["--gateway", "192.0.2.1", "--fail-on", "critical"], records)
+            self.assertEqual(code, 3)
+            self.assertIn("critical alert", err)
+        finally:
+            cli._restore()
+
+    def test_zero_exit_when_only_info_alerts(self):
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, _out, _err = cli.run_cli(["--fail-on", "critical"], records)
+            self.assertEqual(code, 0)
+        finally:
+            cli._restore()
+
+    def test_critical_counter_in_stats(self):
+        stats = Stats()
+        stats.count_alert("gateway_mac_changed", "critical")
+        stats.count_alert("new_host", "info")
+        self.assertEqual(stats.critical, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

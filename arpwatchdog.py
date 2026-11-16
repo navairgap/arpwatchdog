@@ -869,11 +869,14 @@ class Stats:
         self.arp_observations = 0
         self.malformed = 0
         self.alerts: "dict[str, int]" = {}
+        self.critical = 0
         self.suppressed = 0
         self.ignored_by_filter = 0
 
-    def count_alert(self, kind: str) -> None:
+    def count_alert(self, kind: str, severity: str = "info") -> None:
         self.alerts[kind] = self.alerts.get(kind, 0) + 1
+        if severity == "critical":
+            self.critical += 1
 
     def summary(self) -> "dict[str, object]":
         return {
@@ -1117,7 +1120,7 @@ class Monitor:
             self.stats.suppressed += 1
             return None
         event["severity"] = severity_for(event)
-        self.stats.count_alert(str(event.get("event")))
+        self.stats.count_alert(str(event.get("event")), str(event["severity"]))
         self.sink(event)
         return event
 
@@ -1243,6 +1246,9 @@ def build_parser() -> "object":
     parser.add_argument("--stats-interval", type=float, default=0.0, metavar="SEC",
                         help="print stats and refresh --metrics-file every SEC seconds "
                              "during live capture")
+    parser.add_argument("--fail-on", choices=("none", "critical"), default="none",
+                        help="exit with code 3 when a critical alert is emitted "
+                             "(useful in CI pipelines)")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1398,6 +1404,10 @@ def main(argv: "list[str] | None" = None) -> int:
         }
         with open(export_path, "w", encoding="utf-8", newline="") as handle:
             writers[export_format](handle)
+    if options.fail_on == "critical" and monitor.stats.critical > 0:
+        print(f"arpwatchdog: {monitor.stats.critical} critical alert(s) emitted",
+              file=sys.stderr)
+        return 3
     return 0
 
 
