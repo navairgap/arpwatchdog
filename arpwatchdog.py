@@ -5,14 +5,24 @@ Input frames are supplied by the operator; this program never sends ARP probes.
 """
 from __future__ import annotations
 
-import datetime as _dt
+import argparse
+import csv
+import datetime as dt
+import html
+import io
 import ipaddress
 import json
 import math
+import os
+import signal
 import sys
+import threading
+import time
+import tomllib
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCHEMA_VERSION = 1
 __version__ = "1.1.0"
@@ -54,7 +64,7 @@ def canonical_address(ip: str) -> str:
     return canonical_ip(ip)
 
 
-def ip_sort_key(ip: str) -> "tuple":
+def ip_sort_key(ip: str) -> tuple:
     """A total sort order across IPv4 and IPv6 addresses."""
     try:
         return (0, f"{ip_to_int(ip):010d}", "")
@@ -68,7 +78,7 @@ def rfc3339(timestamp: float) -> str:
         raise ValueError("timestamp must be numeric")
     if not math.isfinite(timestamp) or timestamp < 0:
         raise ValueError("timestamp must be finite and not negative")
-    moment = _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc)
+    moment = dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
     return moment.strftime("%Y-%m-%dT%H:%M:%S") + f".{moment.microsecond // 1000:03d}Z"
 
 
@@ -102,7 +112,7 @@ def detect_default_gateways(path: str = "/proc/net/route") -> list[str]:
     return gateways
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Observation:
     interface: str
     timestamp: float
@@ -135,7 +145,7 @@ VENDOR_OUIS = {
 }
 
 
-def vendor_for(mac: str) -> "str | None":
+def vendor_for(mac: str) -> str | None:
     """Return the vendor for a MAC's OUI, or None when unknown."""
     try:
         canonical = canonical_mac(mac)
@@ -203,7 +213,7 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
     )
 
 
-def observation_from_scapy_packet(packet: object, interface: str) -> "Observation | None":
+def observation_from_scapy_packet(packet: object, interface: str) -> Observation | None:
     """Convert one captured scapy packet into an Observation (receive only).
 
     Handles IPv4 ARP and IPv6 Neighbor Discovery NS/NA with link-layer options.
@@ -227,7 +237,7 @@ def observation_from_scapy_packet(packet: object, interface: str) -> "Observatio
 
 
 def _dhcp_observation(packet: object, timestamp: float, interface: str,
-                      ether_layer: "object | None") -> "Observation | None":
+                      ether_layer: object | None) -> Observation | None:
     """DHCP ACKs passively confirm a lease: yiaddr -> client MAC."""
     try:
         from scapy.layers.dhcp import BOOTP, DHCP  # noqa: PLC0415 - optional dependency
@@ -262,7 +272,7 @@ def _dhcp_observation(packet: object, timestamp: float, interface: str,
 
 
 def _arp_observation(packet: object, timestamp: float, interface: str,
-                     ether_layer: "object | None") -> "Observation | None":
+                     ether_layer: object | None) -> Observation | None:
     from scapy.layers.l2 import ARP  # noqa: PLC0415 - optional dependency
     arp_layer = packet.getlayer(ARP)
     if arp_layer is None:
@@ -285,7 +295,7 @@ def _arp_observation(packet: object, timestamp: float, interface: str,
 
 
 def _nd_observation(packet: object, timestamp: float, interface: str,
-                    ether_layer: "object | None") -> "Observation | None":
+                    ether_layer: object | None) -> Observation | None:
     """IPv6 Neighbor Discovery: NS claims src->SLLA, NA claims tgt->TLLA."""
     try:
         from scapy.layers.inet6 import (  # noqa: PLC0415 - optional dependency
@@ -373,7 +383,7 @@ class ScapySource:
                     yield item
 
 
-def load_baseline(path: str) -> "tuple[dict[str, str], list[str]]":
+def load_baseline(path: str) -> tuple[dict[str, str], list[str]]:
     """Read an arpwatch-style arp.dat baseline; returns (entries, problems).
 
     Accepted line shapes: `mac ip`, or the extended `mac ip interface time`
@@ -403,18 +413,15 @@ def load_baseline(path: str) -> "tuple[dict[str, str], list[str]]":
     return entries, problems
 
 
-def save_baseline(path: str, entries: "dict[str, str]") -> None:
+def save_baseline(path: str, entries: dict[str, str]) -> None:
     """Write a classic `mac ip` arp.dat baseline file."""
     with open(path, "w", encoding="utf-8") as handle:
         for ip, mac in sorted(entries.items(), key=lambda kv: ip_sort_key(kv[0])):
             handle.write(f"{mac} {ip}\n")
 
 
-def save_state(path: str, entries: "dict[str, str]", gateways: "Iterable[str]" = ()) -> None:
+def save_state(path: str, entries: dict[str, str], gateways: Iterable[str] = ()) -> None:
     """Atomically persist learned mappings and watched gateways as JSON."""
-    import os
-    import time
-
     payload = {
         "schema_version": SCHEMA_VERSION,
         "saved_at": rfc3339(time.time()),
@@ -428,7 +435,7 @@ def save_state(path: str, entries: "dict[str, str]", gateways: "Iterable[str]" =
     os.replace(tmp_path, path)
 
 
-def load_state(path: str) -> "tuple[dict[str, str], list[str], list[str]]":
+def load_state(path: str) -> tuple[dict[str, str], list[str], list[str]]:
     """Restore persisted state; returns (entries, gateways, problems)."""
     problems: list[str] = []
     try:
@@ -470,7 +477,7 @@ class Suppressor:
         self,
         window: float = 60.0,
         max_entries: int = 1024,
-        per_kind: "dict[str, float] | None" = None,
+        per_kind: dict[str, float] | None = None,
     ) -> None:
         if isinstance(window, bool) or not isinstance(window, (int, float)) \
                 or not math.isfinite(window) or window < 0:
@@ -512,7 +519,7 @@ def ip_to_int(ip: str) -> int:
 class IpFilter:
     """Match IPv4 addresses against configured ignore CIDR ranges."""
 
-    def __init__(self, ranges: "Iterable[str]" = ()) -> None:
+    def __init__(self, ranges: Iterable[str] = ()) -> None:
         self._networks: list[tuple[int, int]] = []
         for entry in ranges or ():
             self.add(entry)
@@ -561,7 +568,7 @@ class Tracker:
         report_new_hosts: bool = True,
         flip_flop_window: float = 300.0,
         flip_flop_changes: int = 3,
-        gateways: "Iterable[str]" = (),
+        gateways: Iterable[str] = (),
     ) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
@@ -581,11 +588,11 @@ class Tracker:
         # ip -> [(timestamp, mac), ...] for recent mapping changes, oldest first
         self._changes: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
 
-    def set_gateways(self, gateways: "Iterable[str]") -> None:
+    def set_gateways(self, gateways: Iterable[str]) -> None:
         """Replace the watched gateway set; addresses are canonicalized first."""
         self.gateways = {canonical_address(ip) for ip in gateways}
 
-    def seed_baseline(self, entries: "dict[str, str]", timestamp: float = 0.0) -> None:
+    def seed_baseline(self, entries: dict[str, str], timestamp: float = 0.0) -> None:
         """Pre-load known IP/MAC pairs so known hosts do not alert as new."""
         for ip, mac in entries.items():
             canonical = Observation("baseline", timestamp, canonical_address(ip), canonical_mac(mac))
@@ -595,11 +602,11 @@ class Tracker:
             self._first_seen[canonical.ip] = timestamp
         self._prune()
 
-    def export_baseline(self) -> "dict[str, str]":
+    def export_baseline(self) -> dict[str, str]:
         """Return the current learned IP/MAC map for persistence."""
         return {item.ip: item.mac for item in self._seen.values()}
 
-    def host_records(self) -> "list[dict[str, object]]":
+    def host_records(self) -> list[dict[str, object]]:
         """Return the tracked inventory with first/last seen and change counts."""
         records = []
         for item in self._seen.values():
@@ -694,7 +701,7 @@ class Tracker:
             if ts >= item.timestamp - self.flip_flop_window
         ]
 
-    def _detect_conflict(self, item: Observation) -> "dict[str, object] | None":
+    def _detect_conflict(self, item: Observation) -> dict[str, object] | None:
         """Flag a second MAC claiming the same address inside the flip window.
 
         One MAC change can be a normal replacement; a second different MAC
@@ -730,7 +737,7 @@ class Tracker:
         }
 
 
-def format_event_text(event: "dict") -> str:
+def format_event_text(event: dict) -> str:
     """One-line human-readable alert rendering."""
     parts = [
         event.get("observed_at") or "",
@@ -753,22 +760,17 @@ def format_event_text(event: "dict") -> str:
 CSV_COLUMNS = ("event", "ip", "mac", "previous_mac", "current_mac", "interface", "observed_at")
 
 
-def format_event_csv(event: "dict") -> str:
+def format_event_csv(event: dict) -> str:
     """One-line CSV alert rendering with a fixed column set."""
-    import csv as _csv
-    import io as _io
-
-    buffer = _io.StringIO()
-    writer = _csv.writer(buffer, lineterminator="\n")
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow([event.get(column, "") for column in CSV_COLUMNS])
     return buffer.getvalue().rstrip("\n")
 
 
-def make_sink(format_name: str, stream: "object" = None) -> "callable":
+def make_sink(format_name: str, stream: object = None) -> Callable:
     """Build an event sink that writes the chosen format to a stream."""
-    import sys as _sys
-
-    stream = stream if stream is not None else _sys.stdout
+    stream = stream if stream is not None else sys.stdout
     formatters = {
         "json": lambda event: json.dumps(event, sort_keys=True) + "\n",
         "text": lambda event: format_event_text(event) + "\n",
@@ -778,7 +780,7 @@ def make_sink(format_name: str, stream: "object" = None) -> "callable":
         raise ValueError(f"unknown output format: {format_name}")
     formatter = formatters[format_name]
 
-    def sink(event: "dict") -> None:
+    def sink(event: dict) -> None:
         stream.write(formatter(event))
         stream.flush()
 
@@ -789,8 +791,7 @@ class FileSink:
     """Append formatted alerts to a file, one event per line, with rotation."""
 
     def __init__(self, path: str, format_name: str = "json",
-                 max_bytes: "int | None" = None, backups: int = 1) -> None:
-        import os
+                 max_bytes: int | None = None, backups: int = 1) -> None:
         formatters = {
             "json": lambda event: json.dumps(event, sort_keys=True) + "\n",
             "text": lambda event: format_event_text(event) + "\n",
@@ -820,7 +821,7 @@ class FileSink:
                 os.replace(newer, older)
         self._stream = open(self._path, "a", encoding="utf-8")
 
-    def __call__(self, event: "dict") -> None:
+    def __call__(self, event: dict) -> None:
         rendered = self._render(event)
         if self._max_bytes is not None:
             try:
@@ -851,7 +852,7 @@ class SyslogSink:
         self._syslog = _syslog
         self._syslog.openlog(ident)
 
-    def __call__(self, event: "dict") -> None:
+    def __call__(self, event: dict) -> None:
         priority = self.PRIORITY_BY_EVENT.get(str(event.get("event")), 5)  # 5=LOG_NOTICE
         self._syslog.syslog(priority, format_event_text(event))
 
@@ -867,7 +868,7 @@ class WebhookSink:
         self.failures = 0
         self.delivered = 0
 
-    def __call__(self, event: "dict") -> None:
+    def __call__(self, event: dict) -> None:
         import urllib.request
         payload = json.dumps(event, sort_keys=True).encode("utf-8")
         request = urllib.request.Request(
@@ -886,7 +887,7 @@ class WebhookSink:
             print(f"arpwatchdog: webhook delivery failed: {exc}", file=sys.stderr)
 
 
-def severity_for(event: "dict") -> str:
+def severity_for(event: dict) -> str:
     """Assign an operator-facing severity; signals, not verdicts."""
     if event.get("flip_flop"):
         return "critical"
@@ -898,10 +899,10 @@ def severity_for(event: "dict") -> str:
     return "info"
 
 
-def multi_sink(*sinks: "callable") -> "callable":
+def multi_sink(*sinks: Callable) -> Callable:
     """Dispatch one event to every configured sink."""
 
-    def sink(event: "dict") -> None:
+    def sink(event: dict) -> None:
         for target in sinks:
             target(event)
 
@@ -916,7 +917,7 @@ class Stats:
         self.non_arp = 0
         self.arp_observations = 0
         self.malformed = 0
-        self.alerts: "dict[str, int]" = {}
+        self.alerts: dict[str, int] = {}
         self.critical = 0
         self.suppressed = 0
         self.ignored_by_filter = 0
@@ -926,7 +927,7 @@ class Stats:
         if severity == "critical":
             self.critical += 1
 
-    def summary(self) -> "dict[str, object]":
+    def summary(self) -> dict[str, object]:
         return {
             "records_read": self.records,
             "arp_observations": self.arp_observations,
@@ -945,7 +946,7 @@ class Stats:
 class PcapSource:
     """Replay ARP observations from a saved pcap/pcapng capture (read-only)."""
 
-    def __init__(self, path: str, interface: "str | None" = None) -> None:
+    def __init__(self, path: str, interface: str | None = None) -> None:
         if not path:
             raise ValueError("a capture path is required for pcap replay")
         self.path = path
@@ -974,7 +975,7 @@ class PcapSource:
                     yield item
 
 
-def render_inventory_markdown(records: "list[dict[str, object]]") -> str:
+def render_inventory_markdown(records: list[dict[str, object]]) -> str:
     """Render the tracked inventory as a markdown table."""
     lines = [
         "| ip | mac | vendor | interface | first seen | last seen | changes |",
@@ -989,12 +990,11 @@ def render_inventory_markdown(records: "list[dict[str, object]]") -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_inventory_html(records: "list[dict[str, object]]") -> str:
+def render_inventory_html(records: list[dict[str, object]]) -> str:
     """Render the tracked inventory as a standalone HTML page."""
-    import html as _html
 
     def esc(value: object) -> str:
-        return _html.escape(str(value))
+        return html.escape(str(value))
 
     rows = []
     for record in records:
@@ -1021,7 +1021,7 @@ def render_inventory_html(records: "list[dict[str, object]]") -> str:
     )
 
 
-def render_metrics(stats: "Stats", tracked_hosts: int) -> str:
+def render_metrics(stats: Stats, tracked_hosts: int) -> str:
     """Render run statistics in Prometheus text exposition format."""
     lines = [
         "# HELP arpwatchdog_observations_total ARP/ND/DHCP observations processed.",
@@ -1046,7 +1046,7 @@ def render_metrics(stats: "Stats", tracked_hosts: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def save_metrics(path: str, stats: "Stats", tracked_hosts: int) -> None:
+def save_metrics(path: str, stats: Stats, tracked_hosts: int) -> None:
     """Atomically write the current metrics snapshot to path."""
     import os
     tmp_path = f"{path}.tmp"
@@ -1058,10 +1058,7 @@ def save_metrics(path: str, stats: "Stats", tracked_hosts: int) -> None:
 class MetricsServer:
     """Serve the current metrics snapshot over HTTP (opt-in, local)."""
 
-    def __init__(self, provider: "callable", host: str = "127.0.0.1", port: int = 9835) -> None:
-        import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
+    def __init__(self, provider: Callable, host: str = "127.0.0.1", port: int = 9835) -> None:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -1080,7 +1077,6 @@ class MetricsServer:
                 pass
 
         self._provider = provider
-        self._threading = threading
         self._server = ThreadingHTTPServer((host, port), Handler)
         self._thread = None
 
@@ -1089,7 +1085,7 @@ class MetricsServer:
         return self._server.server_address[1]
 
     def start(self) -> None:
-        self._thread = self._threading.Thread(
+        self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True
         )
         self._thread.start()
@@ -1104,14 +1100,12 @@ class MetricsServer:
 class PeriodicReporter:
     """Run a callback on an interval until stopped (used for live summaries)."""
 
-    def __init__(self, interval: float, action: "callable") -> None:
-        import threading
+    def __init__(self, interval: float, action: Callable) -> None:
         if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
                 or not math.isfinite(interval) or interval <= 0:
             raise ValueError("stats interval must be a positive finite number")
         self.interval = float(interval)
         self.action = action
-        self._threading = threading
         self._event = threading.Event()
         self._thread = None
 
@@ -1123,7 +1117,7 @@ class PeriodicReporter:
                 except Exception as exc:  # never kill the reporter thread
                     print(f"arpwatchdog: stats interval: {exc}", file=sys.stderr)
 
-        self._thread = self._threading.Thread(target=loop, daemon=True)
+        self._thread = threading.Thread(target=loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -1148,10 +1142,10 @@ class Monitor:
     def __init__(
         self,
         tracker: Tracker,
-        suppressor: "Suppressor | None" = None,
-        ip_filter: "IpFilter | None" = None,
-        sink: "callable | None" = None,
-        stats: "Stats | None" = None,
+        suppressor: Suppressor | None = None,
+        ip_filter: IpFilter | None = None,
+        sink: Callable | None = None,
+        stats: Stats | None = None,
         debug: bool = False,
     ) -> None:
         self.tracker = tracker
@@ -1165,7 +1159,7 @@ class Monitor:
         if self.debug:
             print(f"debug: {message}", file=sys.stderr)
 
-    def handle_observation(self, item: Observation) -> "dict | None":
+    def handle_observation(self, item: Observation) -> dict | None:
         """Run one observation through detections and the alert pipeline."""
         self.stats.arp_observations += 1
         event = self.tracker.observe(item)
@@ -1185,7 +1179,7 @@ class Monitor:
         self.sink(event)
         return event
 
-    def run_jsonl(self, stream: "object") -> int:
+    def run_jsonl(self, stream: object) -> int:
         """Read JSONL records with interface, timestamp and frame_hex."""
         problems = 0
         for line_number, line in enumerate(stream, 1):
@@ -1204,7 +1198,7 @@ class Monitor:
                 print(f"arpwatchdog: line {line_number}: {exc}", file=sys.stderr)
         return problems
 
-    def run_live(self, interface: str, stop: "StopFlag | None" = None) -> None:
+    def run_live(self, interface: str, stop: StopFlag | None = None) -> None:
         """Capture passively from an interface until interrupted or stopped."""
         source = ScapySource(interface)
         try:
@@ -1215,14 +1209,14 @@ class Monitor:
         except KeyboardInterrupt:
             pass
 
-    def run_pcap(self, path: str, interface: "str | None" = None) -> None:
+    def run_pcap(self, path: str, interface: str | None = None) -> None:
         """Replay a saved capture through the pipeline."""
         source = PcapSource(path, interface)
         for item in source.observations():
             self.handle_observation(item)
 
 
-def _print_event(event: "dict") -> None:
+def _print_event(event: dict) -> None:
     print(json.dumps(event, sort_keys=True))
 
 
@@ -1236,10 +1230,8 @@ CONFIG_KEYS = frozenset({
 CONFIG_ALIASES = {"gateways": "gateway"}
 
 
-def load_config(path: str) -> "dict[str, object]":
+def load_config(path: str) -> dict[str, object]:
     """Load a TOML config; recognized keys become CLI defaults."""
-    import tomllib
-
     with open(path, "rb") as handle:
         data = tomllib.load(handle)
     if "arpwatchdog" in data and isinstance(data["arpwatchdog"], dict):
@@ -1253,9 +1245,7 @@ def load_config(path: str) -> "dict[str, object]":
     return resolved
 
 
-def build_parser() -> "object":
-    import argparse
-
+def build_parser() -> object:
     parser = argparse.ArgumentParser(
         prog="arpwatchdog",
         description="Passive ARP spoofing detector: watches IP/MAC changes, "
@@ -1330,7 +1320,7 @@ def build_parser() -> "object":
     return parser
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     options = parser.parse_args(argv)
     chosen_modes = [name for name in ("interface", "pcap", "replay")
@@ -1371,7 +1361,7 @@ def main(argv: "list[str] | None" = None) -> int:
             tracker.set_gateways(gateways)
         suppressor = None if options.no_suppress else Suppressor(options.suppress_window)
         ip_filter = IpFilter(options.ignore)
-        sinks: "list[callable]" = []
+        sinks: list[callable] = []
         if options.dry_run:
             sinks = []  # counters still run; nothing is emitted anywhere
         elif not options.quiet:
@@ -1409,7 +1399,6 @@ def main(argv: "list[str] | None" = None) -> int:
 
     try:
         if options.interface:
-            import signal
             stop = StopFlag()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 try:
