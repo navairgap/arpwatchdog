@@ -1,0 +1,121 @@
+.TH ARPWATCHDOG 1 "2026-11-16" "arpwatchdog 1.1.0" "User Commands"
+.SH NAME
+arpwatchdog \- passive ARP spoofing detector for local networks
+.SH SYNOPSIS
+.B arpwatchdog
+[\fB\-i\fR \fIIFACE\fR | \fB\-r\fR \fIFILE\fR | \fB\-p\fR \fIFILE\fR]
+[\fIoptions\fR]
+.SH DESCRIPTION
+.B arpwatchdog
+watches IP\-to\-MAC mapping changes, rapid MAC flip\-flops and gateway MAC
+moves — the classic signatures of ARP poisoning / MITM attacks — and emits
+structured alerts in real time.
+.PP
+It is strictly passive: it never sends ARP probes, never scans and never
+injects packets. Capture requires raw\-socket privileges; prefer
+.B setcap cap_net_raw
+on a dedicated interpreter over running as root.
+.PP
+A mapping change is a signal to investigate, not proof of attack. DHCP
+renewals, router failover, virtualization and hardware replacement produce
+legitimate changes.
+.SH MODES
+.TP
+.BR \-i ", " \-\-interface " " \fIIFACE\fR
+Capture ARP/ND/DHCP live on \fIIFACE\fR (requires scapy). The default gateway
+is auto\-detected from the routing table unless \fB\-\-gateway\fR is given.
+.TP
+.BR \-r ", " \-\-replay " " \fIFILE\fR
+Replay JSONL records
+.RS
+ {"interface":"eth0","timestamp":1730000000.5,"frame_hex":"..."}
+.RE
+from \fIFILE\fR; \fB\-\fR or omission reads stdin.
+.TP
+.BR \-p ", " \-\-pcap " " \fIFILE\fR
+Replay observations from a saved pcap/pcapng capture (requires scapy).
+.TP
+.B \-\-list
+Print the learned IP/MAC table after processing.
+.TP
+.B \-\-export " " \fIFORMAT FILE\fR
+Export the learned inventory as \fBjson\fR, \fBcsv\fR, \fBhtml\fR or \fBmd\fR.
+.SH DETECTIONS
+.TP
+.B new_host
+First claim for an address (severity: info).
+.TP
+.B mapping_changed
+An IP now claims a different MAC (warning); carries
+\fBip_conflict\fR when two MACs claim the address inside the flip window and
+\fBflip_flop\fP with rapid alternation evidence (critical).
+.TP
+.B gateway_mac_changed
+A watched gateway MAC moved (critical).
+.SH ALERTING
+.TP
+.BR \-\-format " " \fIjson|text|csv\fR
+Alert rendering (default json).
+.TP
+.BR \-\-alert\-file " " \fIFILE\fR
+Append alerts to \fIFILE\fR; \fB\-\-alert\-max\-bytes\fR rotates it.
+.TP
+.B \-\-syslog
+Send alerts to the system logger (LOG_CRIT for critical events).
+.TP
+.BR \-\-webhook " " \fIURL\fR
+POST each alert as JSON; failures are counted, never fatal.
+.TP
+.B \-\-quiet
+No stdout alerts (combine with sinks above).
+.TP
+.BR \-\-metrics\-file " " \fIPATH\fR ", " \-\-metrics\-serve " " \fI[HOST:]PORT\fR
+Prometheus metrics snapshot or HTTP endpoint (opt\-in; bind localhost).
+.TP
+.BR \-\-fail\-on " " \fIcritical\fR
+Exit code 3 when any critical alert fired (CI pipelines).
+.SH TUNING
+.TP
+.BR \-\-ignore " " \fICIDR\fR
+Never alert for this range (repeatable).
+.TP
+.BR \-\-suppress\-window " " \fISEC\fR
+Dedup window per (event, ip); flip\-flop evidence bypasses it.
+.TP
+.BR \-\-flip\-window " " \fISEC\fR ", " \-\-flip\-changes " " \fIN\fR
+Flip\-flop thresholds (default 300s / 3 changes).
+.TP
+.BR \-\-baseline " " \fIFILE\fR
+arpwatch arp.dat baseline (mac ip per line).
+.TP
+.BR \-\-state " " \fIFILE\fR
+Persist learned mappings across restarts (atomic JSON).
+.TP
+.BR \-\-config " " \fIFILE.toml\fR
+Default options from TOML; CLI flags override.
+.TP
+.B \-\-dry\-run
+Count events, emit nothing. \fB\-\-debug\fR logs pipeline decisions.
+.SH EXIT STATUS
+.TP
+.B 0
+No critical alerts (or \-\-fail\-on none).
+.TP
+.B 2
+Usage/configuration error.
+.TP
+.B 3
+Critical alert(s) emitted and \-\-fail\-on critical.
+.SH FILES
+.TP
+.I examples/arpwatchdog.toml
+Annotated configuration example.
+.TP
+.I deploy/arpwatchdog.service
+Hardened systemd unit (CAP_NET_RAW only, DynamicUser).
+.SH SEE ALSO
+arpwatch(8), addrwatch(1)
+.PP
+Repository: https://github.com/navairgap/arpwatchdog
+.SH LICENSE
+MIT
