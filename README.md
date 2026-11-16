@@ -15,19 +15,30 @@ listens to ARP traffic that is already on the wire.
 ## Features
 
 - **Detections** — new hosts, IP/MAC mapping changes, gateway MAC changes,
-  rapid flip-flops (possible spoofing), gratuitous ARP announcements, with
-  `info` / `warning` / `critical` severity on every event.
+  rapid flip-flops (possible spoofing), duplicate-IP conflict evidence,
+  gratuitous ARP announcements, with `info` / `warning` / `critical`
+  severity on every event.
 - **Live capture** — passive sniffing via scapy (`--interface`), auto-detects
   your default gateway from the routing table.
-- **Offline replay** — feed JSONL frame records from stdin or a file
-  (`--replay`), ideal for CI, forensics and air-gapped review.
+- **Offline replay** — JSONL frame records from stdin or a file (`--replay`),
+  or pcap/pcapng captures (`--pcap`); ideal for CI, forensics and air-gapped
+  review.
+- **More protocols** — IPv6 neighbor discovery (NS/NA) and DHCP ACK leases
+  are observed passively alongside ARP.
 - **Baselines** — arpwatch `arp.dat` compatible (`--baseline`), so known
   hosts do not alert as new.
-- **State** — learned mappings survive restarts (`--state`), atomic writes.
-- **Alert sinks** — stdout, file, syslog, and webhooks (`--alert-file`,
-  `--syslog`, `--webhook`), in `json`, `text` or `csv` formats.
+- **State** — learned mappings survive restarts (`--state`); SIGTERM saves
+  state before shutdown.
+- **Alert sinks** — stdout, size-rotated files, syslog, and webhooks
+  (`--alert-file`, `--syslog`, `--webhook`), in `json`, `text` or `csv`
+  formats.
+- **Metrics** — Prometheus snapshots (`--metrics-file`) or a local HTTP
+  endpoint (`--metrics-serve`), periodic summaries (`--stats-interval`).
+- **Reports** — inventory exports as json, csv, html and markdown.
+- **CI-friendly** — `--fail-on critical` exits 3 when a spoofing signature
+  fired; `--dry-run` processes silently.
 - **Tuning** — CIDR ignore lists, per-alert suppression windows, bounded
-  memory everywhere, TOML config files, run statistics.
+  memory everywhere, TOML config files, run statistics, vendor OUI labels.
 
 ## Quick start
 
@@ -122,7 +133,8 @@ One JSON object per line:
 `frame_hex` is a complete Ethernet frame. Ethernet/IPv4 ARP with up to two
 VLAN tags is parsed; non-ARP frames and RFC 5227 probes (0.0.0.0 senders) are
 counted and ignored; malformed records produce stderr diagnostics without
-stopping the run.
+stopping the run. Saved captures can be replayed directly with `--pcap
+capture.pcap` — no JSONL conversion needed.
 
 ## Comparison with similar tools
 
@@ -139,8 +151,9 @@ stopping the run.
 ## Development
 
 ```console
-$ python3 -m unittest discover -v       # 69 tests, no network needed
-$ flake8 arpwatchdog.py test_arpwatchdog.py --max-line-length=110
+$ make test                              # 112 tests, no network needed
+$ make lint                              # flake8
+$ python3 -m unittest discover -v        # or directly
 ```
 
 Design notes live in [docs/](docs/): event schema, passive-input contract,

@@ -1,18 +1,20 @@
-# Passive ARP input
+# Passive input
 
-The first implementation is intentionally offline: it accepts one Ethernet
-frame per JSONL input record and never opens a raw socket or transmits probes.
+The tool is passive by contract: every input path is read-only. It never
+opens a raw socket for sending, never transmits probes, and never injects
+packets. Three input channels exist:
 
-Each input line has this shape:
+1. JSONL replay (`--replay`): one Ethernet frame per record, offline.
+2. Capture replay (`--pcap`): saved pcap/pcapng files, offline.
+3. Live capture (`--interface`): scapy sniffing with an `arp` BPF filter.
 
-```json
-{"interface":"eth0","timestamp":1730000000.5,"frame_hex":"00112233445566778899aabb0806..."}
-```
+## Observed protocols
 
-`frame_hex` is the complete Ethernet frame in hexadecimal.
-The parser accepts Ethernet/IPv4 ARP and up to two 802.1Q/802.1ad VLAN tags.
-Unsupported hardware/protocol combinations and non-ARP frames are ignored;
-truncated ARP frames are reported to stderr.
+- Ethernet/IPv4 ARP with up to two 802.1Q/802.1ad VLAN tags; RFC 5227 probes
+  (0.0.0.0 senders) do not claim ownership and are skipped.
+- IPv6 Neighbor Discovery NS/NA with link-layer address options; the
+  unspecified source `::` is treated as a probe and skipped.
+- DHCP ACKs, which confirm a lease mapping (`kind: dhcp_ack`).
 
 A mapping change event includes the old and new MAC, interface names, and
 timestamps. It is deliberately phrased as an observation: DHCP renewals,
@@ -20,6 +22,4 @@ router failover, virtual machines, and hardware replacement can all change a
 legitimate mapping. Preserve the evidence and investigate before drawing a
 conclusion.
 
-For capture collection, use an approved passive capture workflow on an
-interface you administer. Do not add ARP probes, poisoning, or packet
-injection to this tool.
+Do not add ARP probes, poisoning, or packet injection to this tool.
