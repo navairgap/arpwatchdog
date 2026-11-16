@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 SCHEMA_VERSION = 1
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def canonical_mac(mac: str) -> str:
