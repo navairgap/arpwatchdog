@@ -588,6 +588,7 @@ class Tracker:
             records.append({
                 "ip": item.ip,
                 "mac": item.mac,
+                "vendor": vendor_for(item.mac),
                 "interface": item.interface,
                 "first_seen": rfc3339(first),
                 "first_seen_epoch": first,
@@ -916,6 +917,53 @@ class PcapSource:
                     continue
                 if item is not None:
                     yield item
+
+
+def render_inventory_markdown(records: "list[dict[str, object]]") -> str:
+    """Render the tracked inventory as a markdown table."""
+    lines = [
+        "| ip | mac | vendor | interface | first seen | last seen | changes |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for record in records:
+        lines.append(
+            f"| {record['ip']} | {record['mac']} | {record.get('vendor') or ''} "
+            f"| {record['interface']} | {record['first_seen']} "
+            f"| {record['last_seen']} | {record['recent_changes']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_inventory_html(records: "list[dict[str, object]]") -> str:
+    """Render the tracked inventory as a standalone HTML page."""
+    import html as _html
+
+    def esc(value: object) -> str:
+        return _html.escape(str(value))
+
+    rows = []
+    for record in records:
+        rows.append(
+            f"<tr><td>{esc(record['ip'])}</td><td>{esc(record['mac'])}</td>"
+            f"<td>{esc(record.get('vendor') or '')}</td>"
+            f"<td>{esc(record['interface'])}</td>"
+            f"<td>{esc(record['first_seen'])}</td>"
+            f"<td>{esc(record['last_seen'])}</td>"
+            f"<td>{esc(record['recent_changes'])}</td></tr>"
+        )
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        "<title>arpwatchdog inventory</title>\n"
+        "<style>body{font-family:sans-serif;margin:2rem}"
+        "table{border-collapse:collapse}th,td{border:1px solid #999;"
+        "padding:.25rem .5rem;text-align:left}th{background:#eee}</style>\n"
+        "</head>\n<body>\n<h1>arpwatchdog inventory</h1>\n"
+        "<table>\n<tr><th>ip</th><th>mac</th><th>vendor</th><th>interface</th>"
+        "<th>first seen</th><th>last seen</th><th>changes</th></tr>\n"
+        + "\n".join(rows) +
+        "\n</table>\n</body>\n</html>\n"
+    )
 
 
 def render_metrics(stats: "Stats", tracked_hosts: int) -> str:
@@ -1333,19 +1381,23 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"{mac}  {ip}")
     if options.export:
         export_format, export_path = options.export
-        if export_format not in ("json", "csv"):
-            parser.error("export format must be json or csv")
-        if export_format == "json":
-            with open(export_path, "w", encoding="utf-8") as handle:
-                json.dump(tracker.export_baseline(), handle, sort_keys=True, indent=2)
-                handle.write("\n")
-        else:
-            with open(export_path, "w", encoding="utf-8", newline="") as handle:
-                handle.write("ip,mac\n")
-                for ip, mac in sorted(
-                    tracker.export_baseline().items(), key=lambda kv: ip_sort_key(kv[0])
-                ):
-                    handle.write(f"{ip},{mac}\n")
+        if export_format not in ("json", "csv", "html", "md"):
+            parser.error("export format must be json, csv, html or md")
+        records = sorted(tracker.host_records(), key=lambda record: ip_sort_key(str(record["ip"])))
+        writers = {
+            "json": lambda handle: (
+                json.dump(tracker.export_baseline(), handle, sort_keys=True, indent=2),
+                handle.write("\n"),
+            ),
+            "csv": lambda handle: (
+                handle.write("ip,mac\n"),
+                [handle.write(f"{entry['ip']},{entry['mac']}\n") for entry in records],
+            ),
+            "html": lambda handle: handle.write(render_inventory_html(records)),
+            "md": lambda handle: handle.write(render_inventory_markdown(records)),
+        }
+        with open(export_path, "w", encoding="utf-8", newline="") as handle:
+            writers[export_format](handle)
     return 0
 
 

@@ -30,6 +30,8 @@ from arpwatchdog import (
     PcapSource,
     parse_frame,
     PeriodicReporter,
+    render_inventory_html,
+    render_inventory_markdown,
     render_metrics,
     save_baseline,
     save_metrics,
@@ -1213,6 +1215,54 @@ class PeriodicReporterTests(unittest.TestCase):
             PeriodicReporter(0, lambda: None)
         with self.assertRaises(ValueError):
             PeriodicReporter(float("nan"), lambda: None)
+
+
+class InventoryReportTests(unittest.TestCase):
+    def records(self):
+        return [{
+            "ip": "192.0.2.10", "mac": "02:00:00:00:00:01", "vendor": None,
+            "interface": "eth0", "first_seen": "t1", "last_seen": "t2",
+            "first_seen_epoch": 1.0, "last_seen_epoch": 2.0, "recent_changes": 1,
+        }, {
+            "ip": "192.0.2.11", "mac": "52:54:00:00:00:02", "vendor": "QEMU/KVM",
+            "interface": "eth0", "first_seen": "t1", "last_seen": "t3",
+            "first_seen_epoch": 1.0, "last_seen_epoch": 3.0, "recent_changes": 0,
+        }]
+
+    def test_markdown_table_renders_rows(self):
+        text = render_inventory_markdown(self.records())
+        self.assertIn("| 192.0.2.10 | 02:00:00:00:00:01 |", text)
+        self.assertIn("| 192.0.2.11 | 52:54:00:00:00:02 | QEMU/KVM |", text)
+        self.assertTrue(text.startswith("| ip | mac | vendor |"))
+
+    def test_html_escapes_and_renders_rows(self):
+        records = [{"ip": "<b>192.0.2.9</b>", "mac": "02:00:00:00:00:01", "vendor": None,
+                    "interface": "eth0", "first_seen": "t1", "last_seen": "t2",
+                    "first_seen_epoch": 1.0, "last_seen_epoch": 2.0, "recent_changes": 0}]
+        text = render_inventory_html(records)
+        self.assertIn("&lt;b&gt;192.0.2.9&lt;/b&gt;", text)
+        self.assertNotIn("<b>192.0.2.9</b>", text.split("<table>")[1])
+        self.assertIn("<table>", text)
+
+    def test_cli_export_html_and_md(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            for extension in ("html", "md"):
+                path = os.path.join(workdir.name, f"hosts.{extension}")
+                code, _out, _err = cli.run_cli(["--export", extension, path], records)
+                self.assertEqual(code, 0)
+                with open(path) as handle:
+                    content = handle.read()
+                self.assertIn("192.0.2.10", content)
+                if extension == "html":
+                    self.assertIn("<table>", content)
+        finally:
+            cli._restore()
 
 
 if __name__ == "__main__":
