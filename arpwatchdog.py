@@ -743,6 +743,34 @@ class Stats:
         return "stats: " + " ".join(parts)
 
 
+class PcapSource:
+    """Replay ARP observations from a saved pcap/pcapng capture (read-only)."""
+
+    def __init__(self, path: str, interface: "str | None" = None) -> None:
+        if not path:
+            raise ValueError("a capture path is required for pcap replay")
+        self.path = path
+        self.interface = interface or "pcap"
+
+    def observations(self):
+        """Yield Observations from the capture, in order."""
+        try:
+            from scapy.utils import PcapReader  # noqa: PLC0415 - optional dependency
+        except ImportError as exc:
+            raise RuntimeError(
+                "pcap replay requires scapy (pip install scapy); "
+                "use replay mode to process saved JSONL instead"
+            ) from exc
+        with PcapReader(self.path) as reader:
+            for packet in reader:
+                try:
+                    item = observation_from_scapy_packet(packet, self.interface)
+                except ValueError:
+                    continue
+                if item is not None:
+                    yield item
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -805,6 +833,12 @@ class Monitor:
         except KeyboardInterrupt:
             pass
 
+    def run_pcap(self, path: str, interface: "str | None" = None) -> None:
+        """Replay a saved capture through the pipeline."""
+        source = PcapSource(path, interface)
+        for item in source.observations():
+            self.handle_observation(item)
+
 
 def _print_event(event: "dict") -> None:
     print(json.dumps(event, sort_keys=True))
@@ -848,6 +882,9 @@ def build_parser() -> "object":
                         help="capture ARP live on this interface (requires scapy)")
     parser.add_argument("-r", "--replay", metavar="FILE", default=None,
                         help="replay JSONL records from FILE ('-' or omitted reads stdin)")
+    parser.add_argument("-p", "--pcap", metavar="FILE", default=None,
+                        help="replay ARP observations from a saved pcap/pcapng capture "
+                             "(requires scapy)")
     parser.add_argument("-f", "--baseline", metavar="FILE",
                         help="load an arp.dat-style baseline (mac ip per line)")
     parser.add_argument("--state", metavar="FILE",
@@ -947,6 +984,8 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if options.interface:
         monitor.run_live(options.interface)
+    elif options.pcap:
+        monitor.run_pcap(options.pcap, options.interface or None)
     else:
         if options.replay in (None, "-"):
             stream = sys.stdin

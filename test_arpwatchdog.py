@@ -23,6 +23,7 @@ from arpwatchdog import (
     make_sink,
     Monitor,
     observation_from_scapy_packet,
+    PcapSource,
     parse_frame,
     save_baseline,
     severity_for,
@@ -903,6 +904,56 @@ class HostRecordTests(unittest.TestCase):
         record = tracker.host_records()[0]
         self.assertEqual(record["first_seen_epoch"], 123.0)
         self.assertEqual(record["interface"], "baseline")
+
+
+class PcapSourceTests(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "capture.pcap")
+
+    def write_pcap(self):
+        from scapy.all import wrpcap
+        from scapy.layers.l2 import ARP, Ether
+        packets = [
+            Ether(src="02:00:00:00:00:01") / ARP(op=2, hwsrc="02:00:00:00:00:01",
+                                                psrc="192.0.2.10", pdst="192.0.2.1"),
+            Ether(src="02:00:00:00:00:02") / ARP(op=2, hwsrc="02:00:00:00:00:02",
+                                                psrc="192.0.2.10", pdst="192.0.2.1"),
+        ]
+        wrpcap(self.path, packets)
+
+    def test_replays_arp_packets_only(self):
+        from scapy.all import wrpcap
+        from scapy.layers.inet import IP, TCP
+        from scapy.layers.l2 import ARP, Ether
+        self.write_pcap()
+        extra_path = self.path + "2.pcap"
+        wrpcap(extra_path, [
+            Ether() / IP(src="192.0.2.10", dst="192.0.2.1") / TCP(),
+        ])
+        items = list(PcapSource(self.path, "eth0").observations())
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].ip, "192.0.2.10")
+        self.assertEqual(items[0].mac, "02:00:00:00:00:01")
+        self.assertEqual(items[1].mac, "02:00:00:00:00:02")
+
+    def test_cli_pcap_mode_emits_events(self):
+        self.write_pcap()
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, _err = cli.run_cli(["--pcap", self.path], [])
+            events = [json.loads(line) for line in out.strip().splitlines()]
+            self.assertEqual(code, 0)
+            self.assertEqual([e["event"] for e in events], ["new_host", "mapping_changed"])
+        finally:
+            cli._restore()
+
+    def test_missing_path_rejected(self):
+        with self.assertRaises(ValueError):
+            PcapSource("")
 
 
 if __name__ == "__main__":
