@@ -10,6 +10,7 @@ from arpwatchdog import (
     WebhookSink,
     canonical_address,
     ip_sort_key,
+    LIVE_BPF_FILTER,
     main,
     MetricsServer,
     vendor_for,
@@ -1059,6 +1060,96 @@ class DhcpTests(unittest.TestCase):
         event = tracker.observe(Observation("eth0", 5, "192.0.2.50", "02:00:00:00:00:33",
                                             operation=0, kind="dhcp_ack"))
         self.assertEqual(event["packet_kind"], "dhcp_ack")
+
+    def test_ack_without_server_ip_is_not_dropped(self):
+        from scapy.layers.dhcp import BOOTP, DHCP
+        from scapy.layers.inet import IP, UDP
+        from scapy.layers.l2 import Ether
+        chaddr = bytes.fromhex("020000000044") + b"\x00" * 10
+        packet = Ether(src="02:00:00:00:00:44") / IP(src="0.0.0.0", dst="255.255.255.255") \
+            / UDP(sport=67, dport=68) / BOOTP(op=2, yiaddr="192.0.2.55", chaddr=chaddr) \
+            / DHCP(options=[("message-type", 5), "end"])
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.ip, "192.0.2.55")
+        self.assertEqual(item.target_ip, "0.0.0.0")
+
+
+class LiveFilterTests(unittest.TestCase):
+    def test_bpf_admits_every_parsed_protocol(self):
+        self.assertIn("arp", LIVE_BPF_FILTER)
+        self.assertIn("udp port 67", LIVE_BPF_FILTER)
+        self.assertIn("udp port 68", LIVE_BPF_FILTER)
+        self.assertIn("135", LIVE_BPF_FILTER)
+        self.assertIn("136", LIVE_BPF_FILTER)
+
+    def test_scapy_source_uses_the_shared_filter(self):
+        import scapy.all as scapy_all
+        seen = {}
+
+        class StopLoop(Exception):
+            pass
+
+        def fake_sniff(**kwargs):
+            seen["filter"] = kwargs.get("filter")
+            raise StopLoop
+
+        saved = scapy_all.sniff
+        scapy_all.sniff = fake_sniff
+        try:
+            source = ScapySource("eth0")
+            generator = source.observations()
+            with self.assertRaises(StopLoop):
+                generator.send(None)
+        finally:
+            scapy_all.sniff = saved
+        self.assertEqual(seen["filter"], LIVE_BPF_FILTER)
+
+
+class StateValidationTests(unittest.TestCase):
+    def setUp(self):
+        import os, tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.dir.name, "state.json")
+        self.addCleanup(self.dir.cleanup)
+
+    def test_non_object_entries_are_reported_not_raised(self):
+        with open(self.path, "w") as handle:
+            json.dump({"entries": ["not", "a", "dict"], "gateways": "bad"}, handle)
+        entries, gateways, problems = load_state(self.path)
+        self.assertEqual(entries, {})
+        self.assertEqual(gateways, [])
+        self.assertEqual(len(problems), 2)
+
+    def test_ipv6_gateways_survive_state_round_trip(self):
+        save_state(self.path, {"192.0.2.10": "02:00:00:00:00:01"},
+                   gateways=["fd00::1", "192.0.2.1"])
+        _entries, gateways, problems = load_state(self.path)
+        self.assertEqual(problems, [])
+        self.assertEqual(gateways, ["192.0.2.1", "fd00::1"])
+
+
+class InputModeTests(unittest.TestCase):
+    def test_rejects_conflicting_input_modes(self):
+        cli = CliTests()
+        cli.setUp()
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                cli.run_cli(["--replay", "x.jsonl", "--pcap", "y.pcap"], [])
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("choose one input mode", cli.stderr.getvalue())
+        finally:
+            cli._restore()
+
+    def test_missing_capture_reports_error_not_traceback(self):
+        import io as _io
+        saved_err = sys.stderr
+        sys.stderr = _io.StringIO()
+        try:
+            code = main(["--pcap", "/nonexistent.pcap"])
+        finally:
+            sys.stderr = saved_err
+        self.assertEqual(code, 2)
 
 
 class VendorTests(unittest.TestCase):

@@ -209,7 +209,7 @@ def observation_from_scapy_packet(packet: object, interface: str) -> "Observatio
     Handles IPv4 ARP and IPv6 Neighbor Discovery NS/NA with link-layer options.
     """
     try:
-        from scapy.layers.l2 import ARP, Ether  # noqa: PLC0415 - optional dependency
+        from scapy.layers.l2 import Ether  # noqa: PLC0415 - optional dependency
     except ImportError:  # pragma: no cover - exercised only without scapy
         raise RuntimeError(
             "live capture requires scapy (pip install scapy); "
@@ -251,10 +251,12 @@ def _dhcp_observation(packet: object, timestamp: float, interface: str,
     if len(chaddr) < 6:
         return None
     sender_mac = canonical_mac(chaddr[:6].hex(":"))
+    # siaddr (next server) may be unset or 0.0.0.0; neither is an error.
+    server_ip = canonical_ip(str(bootp_layer.siaddr)) if bootp_layer.siaddr else "0.0.0.0"
     return Observation(
         interface, timestamp, canonical_ip(yiaddr), sender_mac,
         operation=0, kind="dhcp_ack",
-        target_ip=canonical_ip(str(bootp_layer.siaddr) or "0.0.0.0"),
+        target_ip=server_ip,
         target_mac="",
     )
 
@@ -286,8 +288,7 @@ def _nd_observation(packet: object, timestamp: float, interface: str,
                     ether_layer: "object | None") -> "Observation | None":
     """IPv6 Neighbor Discovery: NS claims src->SLLA, NA claims tgt->TLLA."""
     try:
-        # noqa: PLC0415 - optional dependency
-        from scapy.layers.inet6 import (  # noqa: PLC0415
+        from scapy.layers.inet6 import (  # noqa: PLC0415 - optional dependency
             ICMPv6ND_NA, ICMPv6ND_NS, ICMPv6NDOptDstLLAddr, ICMPv6NDOptSrcLLAddr,
         )
     except ImportError:  # pragma: no cover - exercised only without scapy
@@ -327,6 +328,14 @@ def _nd_observation(packet: object, timestamp: float, interface: str,
     )
 
 
+# The live BPF filter must admit every protocol the parsers understand:
+# ARP, DHCP (UDP 67/68) and ICMPv6 types 135/136 (Neighbor Discovery NS/NA).
+LIVE_BPF_FILTER = (
+    "arp or udp port 67 or udp port 68 "
+    "or (icmp6 && (ip6[40] == 135 || ip6[40] == 136))"
+)
+
+
 class ScapySource:
     """Passive live ARP capture; never transmits packets or probes."""
 
@@ -350,7 +359,7 @@ class ScapySource:
             del pending[:]
             sniff(
                 iface=self.interface,
-                filter="arp",
+                filter=LIVE_BPF_FILTER,
                 store=False,
                 timeout=self.chunk_seconds,
                 prn=pending.append,
@@ -430,16 +439,26 @@ def load_state(path: str) -> "tuple[dict[str, str], list[str], list[str]]":
     except (OSError, json.JSONDecodeError) as exc:
         return {}, [], [str(exc)]
     entries: dict[str, str] = {}
-    for ip, mac in (payload.get("entries") or {}).items():
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, dict):
+        if raw_entries is not None:
+            problems.append("entries must be an object; ignoring state file")
+        raw_entries = {}
+    for ip, mac in raw_entries.items():
         try:
-            entries[canonical_ip(ip)] = canonical_mac(mac)
-        except ValueError as exc:
+            entries[canonical_address(ip)] = canonical_mac(mac)
+        except (ValueError, TypeError) as exc:
             problems.append(str(exc))
     gateways: list[str] = []
-    for ip in payload.get("gateways") or []:
+    raw_gateways = payload.get("gateways")
+    if not isinstance(raw_gateways, list):
+        if raw_gateways is not None:
+            problems.append("gateways must be a list; ignoring state file")
+        raw_gateways = []
+    for ip in raw_gateways:
         try:
-            gateways.append(canonical_ip(ip))
-        except ValueError as exc:
+            gateways.append(canonical_address(ip))
+        except (ValueError, TypeError) as exc:
             problems.append(str(exc))
     return entries, gateways, problems
 
@@ -825,7 +844,6 @@ class SyslogSink:
         "new_host": 4,              # LOG_WARNING
         "mapping_changed": 4,       # LOG_WARNING
         "gateway_mac_changed": 2,   # LOG_CRIT
-        "flip_flop": 2,             # LOG_CRIT
     }
 
     def __init__(self, ident: str = "arpwatchdog") -> None:
@@ -942,7 +960,11 @@ class PcapSource:
                 "pcap replay requires scapy (pip install scapy); "
                 "use replay mode to process saved JSONL instead"
             ) from exc
-        with PcapReader(self.path) as reader:
+        try:
+            reader = PcapReader(self.path)
+        except OSError as exc:
+            raise RuntimeError(f"cannot open capture: {exc}") from exc
+        with reader:
             for packet in reader:
                 try:
                     item = observation_from_scapy_packet(packet, self.interface)
@@ -1205,10 +1227,11 @@ def _print_event(event: "dict") -> None:
 
 
 CONFIG_KEYS = frozenset({
-    "interface", "replay", "baseline", "state", "gateway", "ignore",
+    "interface", "replay", "pcap", "baseline", "state", "gateway", "ignore",
     "no-new-hosts", "no-suppress", "suppress-window", "flip-window",
-    "flip-changes", "max-entries", "format", "alert-file", "syslog",
-    "webhook", "quiet", "stats",
+    "flip-changes", "max-entries", "format", "alert-file", "alert-max-bytes",
+    "syslog", "webhook", "quiet", "stats", "metrics-file", "metrics-serve",
+    "stats-interval", "fail-on", "dry-run", "debug", "list", "export",
 })
 CONFIG_ALIASES = {"gateways": "gateway"}
 
@@ -1302,7 +1325,7 @@ def build_parser() -> "object":
     parser.add_argument("--list", action="store_true",
                         help="print the learned IP/MAC table after processing and exit")
     parser.add_argument("--export", nargs=2, metavar=("FORMAT", "FILE"),
-                        help="export the learned table as json or csv")
+                        help="export the learned inventory as json, csv, html or md")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -1310,6 +1333,11 @@ def build_parser() -> "object":
 def main(argv: "list[str] | None" = None) -> int:
     parser = build_parser()
     options = parser.parse_args(argv)
+    chosen_modes = [name for name in ("interface", "pcap", "replay")
+                    if getattr(options, name)]
+    if len(chosen_modes) > 1:
+        parser.error(f"choose one input mode; got --{chosen_modes[0].replace('_', '-')} "
+                     f"and --{chosen_modes[1].replace('_', '-')}")
     if options.config:
         try:
             parser.set_defaults(**load_config(options.config))
@@ -1379,31 +1407,52 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"arpwatchdog: metrics server: {exc}", file=sys.stderr)
             return 2
 
-    if options.interface:
-        import signal
-        stop = StopFlag()
-        for sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        if options.interface:
+            import signal
+            stop = StopFlag()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    signal.signal(sig, stop.request)
+                except (OSError, ValueError):  # pragma: no cover - platform limits
+                    pass
+
+            def report_periodically() -> None:
+                print(monitor.stats.line(), file=sys.stderr)
+                if options.metrics_file:
+                    save_metrics(options.metrics_file, monitor.stats,
+                                 len(tracker.export_baseline()))
+
+            reporter = None
+            if options.stats_interval > 0:
+                reporter = PeriodicReporter(options.stats_interval, report_periodically)
+                reporter.start()
+            monitor.run_live(options.interface, stop)
+            if reporter is not None:
+                reporter.stop()
+            print("arpwatchdog: stopped", file=sys.stderr)
+        elif options.pcap:
+            monitor.run_pcap(options.pcap, options.interface or None)
+        else:
+            if options.replay in (None, "-"):
+                stream = sys.stdin
+            else:
+                try:
+                    stream = open(options.replay, "r", encoding="utf-8")
+                except OSError as exc:
+                    print(f"arpwatchdog: cannot open replay file: {exc}", file=sys.stderr)
+                    return 2
             try:
-                signal.signal(sig, stop.request)
-            except (OSError, ValueError):  # pragma: no cover - platform limits
-                pass
-
-        def report_periodically() -> None:
-            print(monitor.stats.line(), file=sys.stderr)
-            if options.metrics_file:
-                save_metrics(options.metrics_file, monitor.stats,
-                             len(tracker.export_baseline()))
-
-        reporter = None
-        if options.stats_interval > 0:
-            reporter = PeriodicReporter(options.stats_interval, report_periodically)
-            reporter.start()
-        monitor.run_live(options.interface, stop)
-        if reporter is not None:
-            reporter.stop()
-        print("arpwatchdog: stopped", file=sys.stderr)
-    elif options.pcap:
-        monitor.run_pcap(options.pcap, options.interface or None)
+                problems = monitor.run_jsonl(stream)
+            finally:
+                if stream is not sys.stdin:
+                    stream.close()
+            if problems:
+                print(f"arpwatchdog: {problems} malformed input line(s)", file=sys.stderr)
+    except RuntimeError as exc:
+        # Raised when scapy is missing or the capture socket cannot be opened.
+        print(f"arpwatchdog: {exc}", file=sys.stderr)
+        return 2
     else:
         if options.replay in (None, "-"):
             stream = sys.stdin
