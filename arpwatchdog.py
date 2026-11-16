@@ -6,6 +6,7 @@ Input frames are supplied by the operator; this program never sends ARP probes.
 from __future__ import annotations
 
 import datetime as _dt
+import ipaddress
 import json
 import math
 import sys
@@ -44,6 +45,21 @@ def canonical_ip(ip: str) -> str:
         if not 0 <= int(part) <= 255:
             raise ValueError(f"invalid IPv4 address: {ip!r}")
     return ".".join(parts)
+
+
+def canonical_address(ip: str) -> str:
+    """Canonicalize either an IPv4 or an IPv6 address string."""
+    if isinstance(ip, str) and ":" in ip:
+        return str(ipaddress.IPv6Address(ip))
+    return canonical_ip(ip)
+
+
+def ip_sort_key(ip: str) -> "tuple":
+    """A total sort order across IPv4 and IPv6 addresses."""
+    try:
+        return (0, f"{ip_to_int(ip):010d}", "")
+    except ValueError:
+        return (1, "0", ipaddress.IPv6Address(ip).packed)
 
 
 def rfc3339(timestamp: float) -> str:
@@ -158,7 +174,10 @@ def parse_frame(frame: bytes, interface: str, timestamp: float) -> Observation |
 
 
 def observation_from_scapy_packet(packet: object, interface: str) -> "Observation | None":
-    """Convert one captured scapy packet into an Observation (receive only)."""
+    """Convert one captured scapy packet into an Observation (receive only).
+
+    Handles IPv4 ARP and IPv6 Neighbor Discovery NS/NA with link-layer options.
+    """
     try:
         from scapy.layers.l2 import ARP, Ether  # noqa: PLC0415 - optional dependency
     except ImportError:  # pragma: no cover - exercised only without scapy
@@ -166,6 +185,17 @@ def observation_from_scapy_packet(packet: object, interface: str) -> "Observatio
             "live capture requires scapy (pip install scapy); "
             "use replay mode to process saved JSONL instead"
         ) from None
+    timestamp = float(packet.time)
+    ether_layer = packet.getlayer(Ether)
+    arp_item = _arp_observation(packet, timestamp, interface, ether_layer)
+    if arp_item is not None:
+        return arp_item
+    return _nd_observation(packet, timestamp, interface, ether_layer)
+
+
+def _arp_observation(packet: object, timestamp: float, interface: str,
+                     ether_layer: "object | None") -> "Observation | None":
+    from scapy.layers.l2 import ARP  # noqa: PLC0415 - optional dependency
     arp_layer = packet.getlayer(ARP)
     if arp_layer is None:
         return None
@@ -177,14 +207,57 @@ def observation_from_scapy_packet(packet: object, interface: str) -> "Observatio
         return None
     sender_mac = canonical_mac(str(arp_layer.hwsrc))
     target_ip = str(arp_layer.pdst)
-    timestamp = float(packet.time)
-    ether_layer = packet.getlayer(Ether)
     target_mac = canonical_mac(str(ether_layer.dst)) if ether_layer is not None else ""
     return Observation(
         interface, timestamp, canonical_ip(sender_ip), sender_mac,
         operation=operation,
         kind=classify_arp(sender_ip, target_ip, operation),
         target_ip=canonical_ip(target_ip), target_mac=target_mac,
+    )
+
+
+def _nd_observation(packet: object, timestamp: float, interface: str,
+                    ether_layer: "object | None") -> "Observation | None":
+    """IPv6 Neighbor Discovery: NS claims src->SLLA, NA claims tgt->TLLA."""
+    try:
+        # noqa: PLC0415 - optional dependency
+        from scapy.layers.inet6 import (  # noqa: PLC0415
+            ICMPv6ND_NA, ICMPv6ND_NS, ICMPv6NDOptDstLLAddr, ICMPv6NDOptSrcLLAddr,
+        )
+    except ImportError:  # pragma: no cover - exercised only without scapy
+        return None
+    ns_layer = packet.getlayer(ICMPv6ND_NS)
+    na_layer = packet.getlayer(ICMPv6ND_NA)
+    if ns_layer is None and na_layer is None:
+        return None
+    ip6_layer = packet.getlayer("IPv6")
+    if ip6_layer is None:
+        return None
+    sender_ip = str(ip6_layer.src)
+    if sender_ip == "::":
+        return None  # RFC 4862 duplicate-address probes do not claim ownership
+    if ns_layer is not None:
+        option = packet.getlayer(ICMPv6NDOptSrcLLAddr)
+        sender_mac = canonical_mac(str(option.lladdr)) if option is not None else \
+            (canonical_mac(str(ether_layer.src)) if ether_layer is not None else None)
+        kind = "nd_neighbor_solicitation"
+        operation = 135
+        target_ip = str(ns_layer.tgt)
+    else:
+        option = packet.getlayer(ICMPv6NDOptDstLLAddr)
+        sender_mac = canonical_mac(str(option.lladdr)) if option is not None else \
+            (canonical_mac(str(ether_layer.src)) if ether_layer is not None else None)
+        kind = "nd_neighbor_advertisement"
+        operation = 136
+        target_ip = str(na_layer.tgt)
+        sender_ip = target_ip  # the advertisement claims the target address
+    if sender_mac is None:
+        return None
+    target_mac = canonical_mac(str(ether_layer.dst)) if ether_layer is not None else ""
+    return Observation(
+        interface, timestamp, canonical_address(sender_ip), sender_mac,
+        operation=operation, kind=kind,
+        target_ip=canonical_address(target_ip), target_mac=target_mac,
     )
 
 
@@ -258,7 +331,7 @@ def load_baseline(path: str) -> "tuple[dict[str, str], list[str]]":
 def save_baseline(path: str, entries: "dict[str, str]") -> None:
     """Write a classic `mac ip` arp.dat baseline file."""
     with open(path, "w", encoding="utf-8") as handle:
-        for ip, mac in sorted(entries.items(), key=lambda kv: (ip_to_int(kv[0]))):
+        for ip, mac in sorted(entries.items(), key=lambda kv: ip_sort_key(kv[0])):
             handle.write(f"{mac} {ip}\n")
 
 
@@ -380,8 +453,14 @@ class IpFilter:
         self._networks.append((network, mask))
 
     def matches(self, ip: str) -> bool:
-        """Return True when ip falls inside any configured ignore range."""
-        value = ip_to_int(ip)
+        """Return True when ip falls inside any configured ignore range.
+
+        IPv6 addresses never match IPv4 CIDR ignore ranges and are not an error.
+        """
+        try:
+            value = ip_to_int(ip)
+        except ValueError:
+            return False
         return any(value & mask == network for network, mask in self._networks)
 
     def __len__(self) -> int:
@@ -411,7 +490,7 @@ class Tracker:
         self.report_new_hosts = report_new_hosts
         self.flip_flop_window = float(flip_flop_window)
         self.flip_flop_changes = flip_flop_changes
-        self.gateways: set[str] = {canonical_ip(ip) for ip in gateways}
+        self.gateways: set[str] = {canonical_address(ip) for ip in gateways}
         self._seen: OrderedDict[str, Observation] = OrderedDict()
         self._first_seen: OrderedDict[str, float] = OrderedDict()
         # ip -> [(timestamp, mac), ...] for recent mapping changes, oldest first
@@ -419,12 +498,12 @@ class Tracker:
 
     def set_gateways(self, gateways: "Iterable[str]") -> None:
         """Replace the watched gateway set; addresses are canonicalized first."""
-        self.gateways = {canonical_ip(ip) for ip in gateways}
+        self.gateways = {canonical_address(ip) for ip in gateways}
 
     def seed_baseline(self, entries: "dict[str, str]", timestamp: float = 0.0) -> None:
         """Pre-load known IP/MAC pairs so known hosts do not alert as new."""
         for ip, mac in entries.items():
-            canonical = Observation("baseline", timestamp, canonical_ip(ip), canonical_mac(mac))
+            canonical = Observation("baseline", timestamp, canonical_address(ip), canonical_mac(mac))
             if canonical.ip in self._seen:
                 continue
             self._seen[canonical.ip] = canonical
@@ -459,7 +538,7 @@ class Tracker:
 
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
-            item.interface, item.timestamp, canonical_ip(item.ip), canonical_mac(item.mac),
+            item.interface, item.timestamp, canonical_address(item.ip), canonical_mac(item.mac),
             operation=item.operation, kind=item.kind,
             target_ip=item.target_ip, target_mac=item.target_mac,
         )
@@ -1010,7 +1089,7 @@ def main(argv: "list[str] | None" = None) -> int:
         save_state(options.state, tracker.export_baseline(), tracker.gateways)
     if options.list:
         for ip, mac in sorted(
-            tracker.export_baseline().items(), key=lambda kv: ip_to_int(kv[0])
+            tracker.export_baseline().items(), key=lambda kv: ip_sort_key(kv[0])
         ):
             print(f"{mac}  {ip}")
     if options.export:
@@ -1025,7 +1104,7 @@ def main(argv: "list[str] | None" = None) -> int:
             with open(export_path, "w", encoding="utf-8", newline="") as handle:
                 handle.write("ip,mac\n")
                 for ip, mac in sorted(
-                    tracker.export_baseline().items(), key=lambda kv: ip_to_int(kv[0])
+                    tracker.export_baseline().items(), key=lambda kv: ip_sort_key(kv[0])
                 ):
                     handle.write(f"{ip},{mac}\n")
     return 0

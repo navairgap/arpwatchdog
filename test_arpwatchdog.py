@@ -8,6 +8,8 @@ from arpwatchdog import (
     IpFilter,
     SyslogSink,
     WebhookSink,
+    canonical_address,
+    ip_sort_key,
     main,
     Observation,
     ScapySource,
@@ -954,6 +956,62 @@ class PcapSourceTests(unittest.TestCase):
     def test_missing_path_rejected(self):
         with self.assertRaises(ValueError):
             PcapSource("")
+
+
+class NeighborDiscoveryTests(unittest.TestCase):
+    def build_ns(self, src_ip, lladdr):
+        from scapy.layers.inet6 import ICMPv6ND_NS, ICMPv6NDOptSrcLLAddr, IPv6
+        from scapy.layers.l2 import Ether
+        return Ether(src=lladdr, dst="33:33:00:00:00:01") / IPv6(
+            src=src_ip, dst="ff02::1") / ICMPv6ND_NS(tgt="fd00::5") \
+            / ICMPv6NDOptSrcLLAddr(lladdr=lladdr)
+
+    def build_na(self, tgt_ip, lladdr):
+        from scapy.layers.inet6 import ICMPv6ND_NA, ICMPv6NDOptDstLLAddr, IPv6
+        from scapy.layers.l2 import Ether
+        return Ether(src=lladdr, dst="33:33:00:00:00:01") / IPv6(
+            src=tgt_ip, dst="ff02::1") / ICMPv6ND_NA(tgt=tgt_ip, R=1) \
+            / ICMPv6NDOptDstLLAddr(lladdr=lladdr)
+
+    def test_parses_neighbor_advertisement_claim(self):
+        packet = self.build_na("fd00::5", "02:00:00:00:00:aa")
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.ip, "fd00::5")
+        self.assertEqual(item.mac, "02:00:00:00:00:aa")
+        self.assertEqual(item.kind, "nd_neighbor_advertisement")
+        self.assertEqual(item.operation, 136)
+
+    def test_parses_neighbor_solicitation_claim(self):
+        packet = self.build_ns("fd00::10", "02:00:00:00:00:bb")
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertEqual(item.ip, "fd00::10")
+        self.assertEqual(item.kind, "nd_neighbor_solicitation")
+        self.assertEqual(item.operation, 135)
+
+    def test_unspecified_source_is_ignored(self):
+        packet = self.build_ns("::", "02:00:00:00:00:bb")
+        self.assertIsNone(observation_from_scapy_packet(packet, "eth0"))
+
+    def test_tracker_follows_ipv6_mapping_changes(self):
+        tracker = Tracker(report_new_hosts=True, gateways=["fd00::1"])
+        tracker.observe(Observation("eth0", 1, "fd00::1", "02:00:00:00:00:01"))
+        event = tracker.observe(Observation("eth0", 2, "fd00::1", "02:00:00:00:00:02"))
+        self.assertEqual(event["event"], "gateway_mac_changed")
+        self.assertEqual(event["ip"], "fd00::1")
+
+    def test_ip_filter_ignores_ipv6_without_error(self):
+        ip_filter = IpFilter(["192.0.2.0/24"])
+        self.assertFalse(ip_filter.matches("fd00::5"))
+
+    def test_canonical_address_handles_both_families(self):
+        self.assertEqual(canonical_address("FD00::0001"), "fd00::1")
+        self.assertEqual(canonical_address("192.0.2.1"), "192.0.2.1")
+
+    def test_sort_key_orders_v4_before_v6(self):
+        import ipaddress as _ip
+        keys = sorted(["fd00::2", "10.0.0.1", "fd00::1", "192.0.2.1"], key=ip_sort_key)
+        self.assertEqual(keys, ["10.0.0.1", "192.0.2.1", "fd00::1", "fd00::2"])
 
 
 if __name__ == "__main__":
