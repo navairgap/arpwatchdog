@@ -1343,5 +1343,43 @@ class DebugTests(unittest.TestCase):
         self.assertEqual(captured_err.getvalue(), "")
 
 
+class AlertRotationTests(unittest.TestCase):
+    def test_rotates_when_size_exceeded(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        path = os.path.join(workdir.name, "alerts.log")
+        sink = FileSink(path, "json", max_bytes=120)
+        sink({"event": "new_host", "ip": "192.0.2.1", "observed_at": "t1"})
+        sink({"event": "new_host", "ip": "192.0.2.2", "observed_at": "t2"})
+        sink({"event": "new_host", "ip": "192.0.2.3", "observed_at": "t3"})
+        sink.close()
+        # Single backup: the newest rotated batch is in .1, the rest is current.
+        self.assertTrue(os.path.exists(path + ".1"))
+        self.assertFalse(os.path.exists(path + ".2"))
+        with open(path + ".1") as handle:
+            rotated = handle.read()
+        self.assertIn("192.0.2.2", rotated)
+        with open(path) as handle:
+            current = handle.read()
+        self.assertIn("192.0.2.3", current)
+        self.assertNotIn("192.0.2.1", current)
+
+    def test_no_rotation_without_limit(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        path = os.path.join(workdir.name, "alerts.log")
+        sink = FileSink(path, "json")
+        for index in range(5):
+            sink({"event": "new_host", "ip": f"192.0.2.{index}", "observed_at": "t"})
+        sink.close()
+        self.assertFalse(os.path.exists(path + ".1"))
+
+    def test_rejects_bad_limit(self):
+        with self.assertRaises(ValueError):
+            FileSink("/tmp/x.log", max_bytes=0)
+
+
 if __name__ == "__main__":
     unittest.main()

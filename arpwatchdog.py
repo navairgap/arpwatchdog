@@ -767,9 +767,11 @@ def make_sink(format_name: str, stream: "object" = None) -> "callable":
 
 
 class FileSink:
-    """Append formatted alerts to a file, one event per line."""
+    """Append formatted alerts to a file, one event per line, with rotation."""
 
-    def __init__(self, path: str, format_name: str = "json") -> None:
+    def __init__(self, path: str, format_name: str = "json",
+                 max_bytes: "int | None" = None, backups: int = 1) -> None:
+        import os
         formatters = {
             "json": lambda event: json.dumps(event, sort_keys=True) + "\n",
             "text": lambda event: format_event_text(event) + "\n",
@@ -777,11 +779,39 @@ class FileSink:
         }
         if format_name not in formatters:
             raise ValueError(f"unknown alert-file format: {format_name}")
+        if max_bytes is not None and max_bytes < 1:
+            raise ValueError("max_bytes must be a positive integer")
         self._render = formatters[format_name]
+        self._path = path
+        self._max_bytes = max_bytes
+        self._backups = max(1, backups)
+        self._os = os
         self._stream = open(path, "a", encoding="utf-8")
 
+    def _rotate(self) -> None:
+        """Shift path.1 -> path.2 ... then move the current file to path.1."""
+        os = self._os
+        self._stream.close()
+        for index in range(self._backups, 0, -1):
+            older = f"{self._path}.{index}"
+            newer = f"{self._path}.{index - 1}" if index > 1 else self._path
+            if os.path.exists(older):
+                os.unlink(older)
+            if os.path.exists(newer):
+                os.replace(newer, older)
+        self._stream = open(self._path, "a", encoding="utf-8")
+
     def __call__(self, event: "dict") -> None:
-        self._stream.write(self._render(event))
+        rendered = self._render(event)
+        if self._max_bytes is not None:
+            try:
+                current_size = self._os.path.getsize(self._path)
+            except OSError:
+                current_size = 0
+            if self._os.path.exists(self._path) \
+                    and current_size + len(rendered.encode("utf-8")) > self._max_bytes:
+                self._rotate()
+        self._stream.write(rendered)
         self._stream.flush()
 
     def close(self) -> None:
@@ -1239,6 +1269,9 @@ def build_parser() -> "object":
                         help="alert output format (default json)")
     parser.add_argument("--alert-file", metavar="FILE",
                         help="also append alerts to FILE")
+    parser.add_argument("--alert-max-bytes", type=int, default=None, metavar="BYTES",
+                        help="rotate --alert-file once it exceeds this size "
+                             "(one backup: FILE.1)")
     parser.add_argument("--syslog", action="store_true",
                         help="also send alerts to the system logger")
     parser.add_argument("--webhook", metavar="URL",
@@ -1316,7 +1349,8 @@ def main(argv: "list[str] | None" = None) -> int:
         elif not options.quiet:
             sinks.append(make_sink(options.format))
         if options.alert_file and not options.dry_run:
-            file_sink = FileSink(options.alert_file, options.format)
+            file_sink = FileSink(options.alert_file, options.format,
+                                 max_bytes=options.alert_max_bytes)
             sinks.append(file_sink)
         if options.syslog and not options.dry_run:
             sinks.append(SyslogSink())
