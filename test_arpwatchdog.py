@@ -31,6 +31,7 @@ from arpwatchdog import (
     save_baseline,
     severity_for,
     save_state,
+    StopFlag,
     rfc3339,
 )
 
@@ -919,11 +920,14 @@ class PcapSourceTests(unittest.TestCase):
     def write_pcap(self):
         from scapy.all import wrpcap
         from scapy.layers.l2 import ARP, Ether
+        broadcast = "ff:ff:ff:ff:ff:ff"
         packets = [
-            Ether(src="02:00:00:00:00:01") / ARP(op=2, hwsrc="02:00:00:00:00:01",
-                                                psrc="192.0.2.10", pdst="192.0.2.1"),
-            Ether(src="02:00:00:00:00:02") / ARP(op=2, hwsrc="02:00:00:00:00:02",
-                                                psrc="192.0.2.10", pdst="192.0.2.1"),
+            Ether(src="02:00:00:00:00:01", dst=broadcast) / ARP(
+                op=2, hwsrc="02:00:00:00:00:01", hwdst=broadcast,
+                psrc="192.0.2.10", pdst="192.0.2.1"),
+            Ether(src="02:00:00:00:00:02", dst=broadcast) / ARP(
+                op=2, hwsrc="02:00:00:00:00:02", hwdst=broadcast,
+                psrc="192.0.2.10", pdst="192.0.2.1"),
         ]
         wrpcap(self.path, packets)
 
@@ -1063,6 +1067,51 @@ class VendorTests(unittest.TestCase):
         self.assertEqual(event["vendor"], "QEMU/KVM")
         event = tracker.observe(Observation("eth0", 2, "192.0.2.10", "02:00:00:00:00:01"))
         self.assertIsNone(event["vendor"])
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_request_is_a_signal_handler_signature(self):
+        stop = StopFlag()
+        stop.request(None, None)  # as signal.signal invokes handlers
+        self.assertTrue(stop.stop)
+
+    def test_run_live_processes_packets_and_stops(self):
+        import scapy.all as scapy_all
+        from scapy.layers.l2 import ARP, Ether
+        broadcast = "ff:ff:ff:ff:ff:ff"
+        packets = [
+            Ether(src="02:00:00:00:00:01", dst=broadcast) / ARP(
+                op=2, hwsrc="02:00:00:00:00:01", hwdst=broadcast,
+                psrc="192.0.2.10", pdst="192.0.2.1"),
+            Ether(src="02:00:00:00:00:02", dst=broadcast) / ARP(
+                op=2, hwsrc="02:00:00:00:00:02", hwdst=broadcast,
+                psrc="192.0.2.10", pdst="192.0.2.1"),
+        ]
+        monitor = Monitor(Tracker(report_new_hosts=False))
+        captured = []
+        monitor.sink = captured.append
+        stop = StopFlag()
+        calls = {"chunks": 0}
+
+        def fake_sniff(**kwargs):
+            calls["chunks"] += 1
+            prn = kwargs.get("prn")
+            for packet in packets:
+                prn(packet)
+            if calls["chunks"] >= 2:
+                stop.request()
+
+        saved = scapy_all.sniff
+        scapy_all.sniff = fake_sniff
+        try:
+            monitor.run_live("eth0", stop)
+        finally:
+            scapy_all.sniff = saved
+        # chunk 1 processed both packets (one mapping_changed alert);
+        # chunk 2 raised the flag before its packets were handled.
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["event"], "mapping_changed")
+        self.assertEqual(calls["chunks"], 2)
 
 
 if __name__ == "__main__":

@@ -918,6 +918,16 @@ class PcapSource:
                     yield item
 
 
+class StopFlag:
+    """A simple cooperative stop request shared with signal handlers."""
+
+    def __init__(self) -> None:
+        self.stop = False
+
+    def request(self, *_args: object) -> None:
+        self.stop = True
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -971,11 +981,13 @@ class Monitor:
                 print(f"arpwatchdog: line {line_number}: {exc}", file=sys.stderr)
         return problems
 
-    def run_live(self, interface: str) -> None:
-        """Capture passively from an interface until interrupted."""
+    def run_live(self, interface: str, stop: "StopFlag | None" = None) -> None:
+        """Capture passively from an interface until interrupted or stopped."""
         source = ScapySource(interface)
         try:
             for item in source.observations():
+                if stop is not None and stop.stop:
+                    break
                 self.handle_observation(item)
         except KeyboardInterrupt:
             pass
@@ -1130,7 +1142,15 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
 
     if options.interface:
-        monitor.run_live(options.interface)
+        import signal
+        stop = StopFlag()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, stop.request)
+            except (OSError, ValueError):  # pragma: no cover - platform limits
+                pass
+        monitor.run_live(options.interface, stop)
+        print("arpwatchdog: stopped", file=sys.stderr)
     elif options.pcap:
         monitor.run_pcap(options.pcap, options.interface or None)
     else:
