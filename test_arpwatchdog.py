@@ -1315,5 +1315,33 @@ class DryRunTests(unittest.TestCase):
             cli._restore()
 
 
+class DebugTests(unittest.TestCase):
+    def test_debug_logs_pipeline_decisions(self):
+        import io as _io
+        captured_err = _io.StringIO()
+        saved_err = sys.stderr
+        sys.stderr = captured_err
+        try:
+            monitor = Monitor(Tracker(report_new_hosts=False), debug=True)
+            records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+            monitor.run_jsonl(_io.StringIO("\n".join(records) + "\n"))
+        finally:
+            sys.stderr = saved_err
+        self.assertIn("debug: 192.0.2.10 via 02:00:00:00:00:01: no event", captured_err.getvalue())
+
+    def test_silent_by_default(self):
+        import io as _io
+        captured_err = _io.StringIO()
+        saved_err = sys.stderr
+        sys.stderr = captured_err
+        try:
+            monitor = Monitor(Tracker(report_new_hosts=False))
+            records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+            monitor.run_jsonl(_io.StringIO("\n".join(records) + "\n"))
+        finally:
+            sys.stderr = saved_err
+        self.assertEqual(captured_err.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

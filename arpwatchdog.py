@@ -1100,24 +1100,33 @@ class Monitor:
         ip_filter: "IpFilter | None" = None,
         sink: "callable | None" = None,
         stats: "Stats | None" = None,
+        debug: bool = False,
     ) -> None:
         self.tracker = tracker
         self.suppressor = suppressor
         self.ip_filter = ip_filter
         self.sink = sink or _print_event
         self.stats = stats or Stats()
+        self.debug = debug
+
+    def _debug_line(self, message: str) -> None:
+        if self.debug:
+            print(f"debug: {message}", file=sys.stderr)
 
     def handle_observation(self, item: Observation) -> "dict | None":
         """Run one observation through detections and the alert pipeline."""
         self.stats.arp_observations += 1
         event = self.tracker.observe(item)
         if event is None:
+            self._debug_line(f"{item.ip} via {item.mac}: no event")
             return None
         if self.ip_filter is not None and self.ip_filter.matches(str(event["ip"])):
             self.stats.ignored_by_filter += 1
+            self._debug_line(f"{item.ip}: ignored by filter")
             return None
         if self.suppressor is not None and not self.suppressor.allow(event):
             self.stats.suppressed += 1
+            self._debug_line(f"{item.ip}: suppressed {event.get('event')}")
             return None
         event["severity"] = severity_for(event)
         self.stats.count_alert(str(event.get("event")), str(event["severity"]))
@@ -1252,6 +1261,8 @@ def build_parser() -> "object":
     parser.add_argument("--dry-run", action="store_true",
                         help="process input and count events but emit no alerts "
                              "(stdout, files, syslog and webhooks stay silent)")
+    parser.add_argument("--debug", action="store_true",
+                        help="log pipeline decisions to stderr")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1313,7 +1324,7 @@ def main(argv: "list[str] | None" = None) -> int:
             sinks.append(WebhookSink(options.webhook))
         monitor = Monitor(
             tracker, suppressor=suppressor, ip_filter=ip_filter,
-            sink=multi_sink(*sinks), stats=Stats(),
+            sink=multi_sink(*sinks), stats=Stats(), debug=options.debug,
         )
     except ValueError as exc:
         print(f"arpwatchdog: {exc}", file=sys.stderr)
