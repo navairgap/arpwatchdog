@@ -190,7 +190,43 @@ def observation_from_scapy_packet(packet: object, interface: str) -> "Observatio
     arp_item = _arp_observation(packet, timestamp, interface, ether_layer)
     if arp_item is not None:
         return arp_item
+    dhcp_item = _dhcp_observation(packet, timestamp, interface, ether_layer)
+    if dhcp_item is not None:
+        return dhcp_item
     return _nd_observation(packet, timestamp, interface, ether_layer)
+
+
+def _dhcp_observation(packet: object, timestamp: float, interface: str,
+                      ether_layer: "object | None") -> "Observation | None":
+    """DHCP ACKs passively confirm a lease: yiaddr -> client MAC."""
+    try:
+        from scapy.layers.dhcp import BOOTP, DHCP  # noqa: PLC0415 - optional dependency
+    except ImportError:  # pragma: no cover - exercised only without scapy
+        return None
+    bootp_layer = packet.getlayer(BOOTP)
+    dhcp_layer = packet.getlayer(DHCP)
+    if bootp_layer is None or dhcp_layer is None:
+        return None
+    message_type = None
+    for option in dhcp_layer.options:
+        if isinstance(option, tuple) and option[0] == "message-type":
+            message_type = option[1]
+            break
+    if message_type != 5:  # DHCPACK only; OFFER/NAK do not confirm a lease
+        return None
+    yiaddr = str(bootp_layer.yiaddr)
+    if yiaddr in ("0.0.0.0", ""):
+        return None
+    chaddr = bytes(bootp_layer.chaddr or b"")
+    if len(chaddr) < 6:
+        return None
+    sender_mac = canonical_mac(chaddr[:6].hex(":"))
+    return Observation(
+        interface, timestamp, canonical_ip(yiaddr), sender_mac,
+        operation=0, kind="dhcp_ack",
+        target_ip=canonical_ip(str(bootp_layer.siaddr) or "0.0.0.0"),
+        target_mac="",
+    )
 
 
 def _arp_observation(packet: object, timestamp: float, interface: str,

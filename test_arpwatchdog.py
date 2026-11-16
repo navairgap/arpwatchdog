@@ -1014,5 +1014,40 @@ class NeighborDiscoveryTests(unittest.TestCase):
         self.assertEqual(keys, ["10.0.0.1", "192.0.2.1", "fd00::1", "fd00::2"])
 
 
+class DhcpTests(unittest.TestCase):
+    def build_ack(self, yiaddr, client_mac):
+        from scapy.layers.dhcp import BOOTP, DHCP
+        from scapy.layers.inet import IP, UDP
+        from scapy.layers.l2 import Ether
+        chaddr = bytes.fromhex(client_mac.replace(":", "")) + b"\x00" * 10
+        return Ether(src=client_mac) / IP(src="192.0.2.1", dst="192.0.2.50") \
+            / UDP(sport=67, dport=68) / BOOTP(
+                op=2, yiaddr=yiaddr, siaddr="192.0.2.1", chaddr=chaddr) \
+            / DHCP(options=[("message-type", 5), ("server_id", "192.0.2.1"), "end"])
+
+    def test_parses_dhcp_ack_lease(self):
+        packet = self.build_ack("192.0.2.50", "02:00:00:00:00:33")
+        item = observation_from_scapy_packet(packet, "eth0")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.ip, "192.0.2.50")
+        self.assertEqual(item.mac, "02:00:00:00:00:33")
+        self.assertEqual(item.kind, "dhcp_ack")
+
+    def test_ignores_non_ack_dhcp(self):
+        from scapy.layers.dhcp import BOOTP, DHCP
+        from scapy.layers.inet import IP, UDP
+        from scapy.layers.l2 import Ether
+        packet = Ether(src="02:00:00:00:00:33") / IP(src="0.0.0.0", dst="255.255.255.255") \
+            / UDP(sport=68, dport=67) / BOOTP(op=1, chaddr=b"\x02" + b"\x00" * 15) \
+            / DHCP(options=[("message-type", 3), "end"])
+        self.assertIsNone(observation_from_scapy_packet(packet, "eth0"))
+
+    def test_dhcp_ack_follows_into_tracker(self):
+        tracker = Tracker(report_new_hosts=True)
+        event = tracker.observe(Observation("eth0", 5, "192.0.2.50", "02:00:00:00:00:33",
+                                            operation=0, kind="dhcp_ack"))
+        self.assertEqual(event["packet_kind"], "dhcp_ack")
+
+
 if __name__ == "__main__":
     unittest.main()
