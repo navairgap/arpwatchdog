@@ -19,6 +19,18 @@
 - Size-rotated alert files (`--alert-max-bytes`).
 - Shell completions (bash, zsh), man page, Dockerfile and Makefile.
 
+### Fixed
+- Live capture now admits IPv6 neighbor discovery and DHCP into its BPF
+  filter (previously ARP-only, so ND/DHCP observations never reached live
+  mode).
+- DHCP ACKs with an unset next-server field are no longer dropped.
+- Corrupt state files with the wrong JSON types are reported instead of
+  raising; IPv6 gateways survive state round trips.
+- `--pcap` and `--replay` together is now a usage error instead of silently
+  preferring pcap; missing captures and capture errors exit 2 with a clear
+  message instead of a traceback.
+- Full flake8 pass (zero findings) and modernized annotations.
+
 ## 1.0.0 — 2026-11-15
 
 First complete release.
