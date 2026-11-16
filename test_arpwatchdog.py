@@ -224,7 +224,8 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(event["gateway"])
 
     def test_detect_default_gateways_parses_proc_route(self):
-        import tempfile, os
+        import tempfile
+        import os
         rows = (
             "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\n"
             "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\n"
@@ -297,7 +298,8 @@ class IpFilterTests(unittest.TestCase):
 
 class BaselineTests(unittest.TestCase):
     def setUp(self):
-        import os, tempfile
+        import os
+        import tempfile
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, "arp.dat")
         self.addCleanup(self.dir.cleanup)
@@ -343,7 +345,8 @@ class BaselineTests(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def setUp(self):
-        import os, tempfile
+        import os
+        import tempfile
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, "arpwatchdog.state.json")
         self.addCleanup(self.dir.cleanup)
@@ -483,7 +486,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("02:00:00:00:00:01  192.0.2.10", out)
 
     def test_state_round_trip_through_cli(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         state_path = os.path.join(workdir.name, "state.json")
@@ -558,7 +562,8 @@ class OutputFormatTests(unittest.TestCase):
 
 class AlertSinkTests(unittest.TestCase):
     def test_file_sink_appends_events(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         path = os.path.join(workdir.name, "alerts.log")
@@ -585,16 +590,22 @@ class AlertSinkTests(unittest.TestCase):
         self.assertEqual(priorities, [2, 4])
 
     def test_webhook_sink_posts_json(self):
-        import types
         class FakeResponse:
             status = 200
-            def __enter__(self): return self
-            def __exit__(self, *exc): return False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
         posted = {}
+
         def fake_urlopen(request, timeout):
             posted["url"] = request.full_url
             posted["data"] = request.data
             return FakeResponse()
+
         import urllib.request
         sink = WebhookSink("https://example.internal/hook")
         saved = urllib.request.urlopen
@@ -609,8 +620,10 @@ class AlertSinkTests(unittest.TestCase):
 
     def test_webhook_sink_counts_failures_without_raising(self):
         import urllib.request
+
         def fake_urlopen(request, timeout):
             raise OSError("connection refused")
+
         sink = WebhookSink("https://example.internal/hook")
         saved = urllib.request.urlopen
         urllib.request.urlopen = fake_urlopen
@@ -700,7 +713,8 @@ class SeverityTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
-        import os, tempfile
+        import os
+        import tempfile
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.path = os.path.join(self.dir.name, "arpwatchdog.toml")
@@ -832,7 +846,8 @@ class ScenarioTests(unittest.TestCase):
         self.assertIn("suppressed=3", err)
 
     def test_state_survives_restart_and_stays_quiet(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         state_path = os.path.join(workdir.name, "state.json")
@@ -920,12 +935,13 @@ class HostRecordTests(unittest.TestCase):
 
 class PcapSourceTests(unittest.TestCase):
     def setUp(self):
-        import os, tempfile
+        import os
+        import tempfile
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.path = os.path.join(self.dir.name, "capture.pcap")
 
-    def write_pcap(self):
+    def write_pcap(self, include_tcp=False):
         from scapy.all import wrpcap
         from scapy.layers.l2 import ARP, Ether
         broadcast = "ff:ff:ff:ff:ff:ff"
@@ -937,18 +953,15 @@ class PcapSourceTests(unittest.TestCase):
                 op=2, hwsrc="02:00:00:00:00:02", hwdst=broadcast,
                 psrc="192.0.2.10", pdst="192.0.2.1"),
         ]
+        if include_tcp:
+            from scapy.layers.inet import IP, TCP
+            packets.insert(1, Ether() / IP(src="192.0.2.10", dst="192.0.2.1") / TCP())
         wrpcap(self.path, packets)
 
     def test_replays_arp_packets_only(self):
-        from scapy.all import wrpcap
-        from scapy.layers.inet import IP, TCP
-        from scapy.layers.l2 import ARP, Ether
-        self.write_pcap()
-        extra_path = self.path + "2.pcap"
-        wrpcap(extra_path, [
-            Ether() / IP(src="192.0.2.10", dst="192.0.2.1") / TCP(),
-        ])
+        self.write_pcap(include_tcp=True)
         items = list(PcapSource(self.path, "eth0").observations())
+        # The TCP packet in the middle of the capture is not an observation.
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].ip, "192.0.2.10")
         self.assertEqual(items[0].mac, "02:00:00:00:00:01")
@@ -1022,7 +1035,6 @@ class NeighborDiscoveryTests(unittest.TestCase):
         self.assertEqual(canonical_address("192.0.2.1"), "192.0.2.1")
 
     def test_sort_key_orders_v4_before_v6(self):
-        import ipaddress as _ip
         keys = sorted(["fd00::2", "10.0.0.1", "fd00::1", "192.0.2.1"], key=ip_sort_key)
         self.assertEqual(keys, ["10.0.0.1", "192.0.2.1", "fd00::1", "fd00::2"])
 
@@ -1108,7 +1120,8 @@ class LiveFilterTests(unittest.TestCase):
 
 class StateValidationTests(unittest.TestCase):
     def setUp(self):
-        import os, tempfile
+        import os
+        import tempfile
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, "state.json")
         self.addCleanup(self.dir.cleanup)
@@ -1214,7 +1227,6 @@ class ShutdownTests(unittest.TestCase):
 
 class MetricsTests(unittest.TestCase):
     def test_render_metrics_exposition_format(self):
-        import io as _io
         stats = Stats()
         stats.arp_observations = 12
         stats.count_alert("new_host")
@@ -1230,7 +1242,8 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("arpwatchdog_suppressed_total 3", text)
 
     def test_cli_writes_metrics_file(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         metrics_path = os.path.join(workdir.name, "metrics.txt")
@@ -1248,7 +1261,8 @@ class MetricsTests(unittest.TestCase):
         self.assertIn('arpwatchdog_alerts_total{event="new_host"} 1', text)
 
     def test_metrics_file_is_atomic(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         path = os.path.join(workdir.name, "m.txt")
@@ -1336,7 +1350,8 @@ class InventoryReportTests(unittest.TestCase):
         self.assertIn("<table>", text)
 
     def test_cli_export_html_and_md(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
@@ -1436,7 +1451,8 @@ class DebugTests(unittest.TestCase):
 
 class AlertRotationTests(unittest.TestCase):
     def test_rotates_when_size_exceeded(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         path = os.path.join(workdir.name, "alerts.log")
@@ -1457,7 +1473,8 @@ class AlertRotationTests(unittest.TestCase):
         self.assertNotIn("192.0.2.1", current)
 
     def test_no_rotation_without_limit(self):
-        import os, tempfile
+        import os
+        import tempfile
         workdir = tempfile.TemporaryDirectory()
         self.addCleanup(workdir.cleanup)
         path = os.path.join(workdir.name, "alerts.log")
