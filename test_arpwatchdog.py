@@ -28,9 +28,12 @@ from arpwatchdog import (
     observation_from_scapy_packet,
     PcapSource,
     parse_frame,
+    render_metrics,
     save_baseline,
+    save_metrics,
     severity_for,
     save_state,
+    Stats,
     StopFlag,
     rfc3339,
 )
@@ -1112,6 +1115,51 @@ class ShutdownTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0]["event"], "mapping_changed")
         self.assertEqual(calls["chunks"], 2)
+
+
+class MetricsTests(unittest.TestCase):
+    def test_render_metrics_exposition_format(self):
+        import io as _io
+        stats = Stats()
+        stats.arp_observations = 12
+        stats.count_alert("new_host")
+        stats.count_alert("new_host")
+        stats.count_alert("mapping_changed")
+        stats.suppressed = 3
+        text = render_metrics(stats, tracked_hosts=7)
+        self.assertIn("# TYPE arpwatchdog_observations_total counter", text)
+        self.assertIn("arpwatchdog_observations_total 12", text)
+        self.assertIn('arpwatchdog_alerts_total{event="new_host"} 2', text)
+        self.assertIn('arpwatchdog_alerts_total{event="mapping_changed"} 1', text)
+        self.assertIn("arpwatchdog_tracked_hosts 7", text)
+        self.assertIn("arpwatchdog_suppressed_total 3", text)
+
+    def test_cli_writes_metrics_file(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        metrics_path = os.path.join(workdir.name, "metrics.txt")
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, _out, _err = cli.run_cli(["--metrics-file", metrics_path], records)
+            self.assertEqual(code, 0)
+        finally:
+            cli._restore()
+        with open(metrics_path) as handle:
+            text = handle.read()
+        self.assertIn("arpwatchdog_tracked_hosts 1", text)
+        self.assertIn('arpwatchdog_alerts_total{event="new_host"} 1', text)
+
+    def test_metrics_file_is_atomic(self):
+        import os, tempfile
+        workdir = tempfile.TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        path = os.path.join(workdir.name, "m.txt")
+        save_metrics(path, Stats(), 0)
+        self.assertFalse(os.path.exists(path + ".tmp"))
+        self.assertTrue(os.path.exists(path))
 
 
 if __name__ == "__main__":

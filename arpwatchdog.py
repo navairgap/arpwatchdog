@@ -918,6 +918,40 @@ class PcapSource:
                     yield item
 
 
+def render_metrics(stats: "Stats", tracked_hosts: int) -> str:
+    """Render run statistics in Prometheus text exposition format."""
+    lines = [
+        "# HELP arpwatchdog_observations_total ARP/ND/DHCP observations processed.",
+        "# TYPE arpwatchdog_observations_total counter",
+        f"arpwatchdog_observations_total {stats.arp_observations}",
+        "# HELP arpwatchdog_alerts_total Alerts emitted by event kind.",
+        "# TYPE arpwatchdog_alerts_total counter",
+    ]
+    for kind, count in sorted(stats.alerts.items()):
+        lines.append(f'arpwatchdog_alerts_total{{event="{kind}"}} {count}')
+    lines += [
+        "# HELP arpwatchdog_tracked_hosts Addresses currently tracked.",
+        "# TYPE arpwatchdog_tracked_hosts gauge",
+        f"arpwatchdog_tracked_hosts {tracked_hosts}",
+        "# HELP arpwatchdog_suppressed_total Alerts suppressed by deduplication.",
+        "# TYPE arpwatchdog_suppressed_total counter",
+        f"arpwatchdog_suppressed_total {stats.suppressed}",
+        "# HELP arpwatchdog_ignored_by_filter_total Events dropped by ignore rules.",
+        "# TYPE arpwatchdog_ignored_by_filter_total counter",
+        f"arpwatchdog_ignored_by_filter_total {stats.ignored_by_filter}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def save_metrics(path: str, stats: "Stats", tracked_hosts: int) -> None:
+    """Atomically write the current metrics snapshot to path."""
+    import os
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(render_metrics(stats, tracked_hosts))
+    os.replace(tmp_path, path)
+
+
 class StopFlag:
     """A simple cooperative stop request shared with signal handlers."""
 
@@ -1076,6 +1110,8 @@ def build_parser() -> "object":
                         help="do not print alerts to stdout")
     parser.add_argument("--stats", action="store_true",
                         help="print a run summary to stderr when processing ends")
+    parser.add_argument("--metrics-file", metavar="PATH",
+                        help="write Prometheus metrics to PATH when processing ends")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1172,6 +1208,8 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if options.stats:
         print(monitor.stats.line(), file=sys.stderr)
+    if options.metrics_file:
+        save_metrics(options.metrics_file, monitor.stats, len(tracker.export_baseline()))
 
     if options.state:
         save_state(options.state, tracker.export_baseline(), tracker.gateways)
