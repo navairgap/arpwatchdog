@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+dist
+build
+*.egg-info
+*.state.json
+.v2c
+.video_agent
