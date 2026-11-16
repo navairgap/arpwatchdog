@@ -876,5 +876,34 @@ class ConflictTests(unittest.TestCase):
         self.assertIsNone(events[1].get("ip_conflict"))
 
 
+class HostRecordTests(unittest.TestCase):
+    def test_records_track_first_and_last_seen(self):
+        tracker = Tracker(report_new_hosts=False)
+        tracker.observe(Observation("eth0", 10, "192.0.2.10", "02:00:00:00:00:01"))
+        tracker.observe(Observation("eth0", 20, "192.0.2.10", "02:00:00:00:00:01"))
+        records = tracker.host_records()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["first_seen_epoch"], 10)
+        self.assertEqual(record["last_seen_epoch"], 20)
+        self.assertEqual(record["recent_changes"], 0)
+        self.assertEqual(record["mac"], "02:00:00:00:00:01")
+
+    def test_recent_changes_counted(self):
+        tracker = Tracker(report_new_hosts=False)
+        tracker.observe(Observation("eth0", 10, "192.0.2.10", "02:00:00:00:00:01"))
+        tracker.observe(Observation("eth0", 20, "192.0.2.10", "02:00:00:00:00:02"))
+        record = tracker.host_records()[0]
+        self.assertEqual(record["recent_changes"], 1)
+        self.assertEqual(record["mac"], "02:00:00:00:00:02")
+
+    def test_seeded_records_carry_baseline_time(self):
+        tracker = Tracker()
+        tracker.seed_baseline({"192.0.2.5": "02:00:00:00:00:07"}, timestamp=123.0)
+        record = tracker.host_records()[0]
+        self.assertEqual(record["first_seen_epoch"], 123.0)
+        self.assertEqual(record["interface"], "baseline")
+
+
 if __name__ == "__main__":
     unittest.main()

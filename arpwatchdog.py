@@ -413,6 +413,7 @@ class Tracker:
         self.flip_flop_changes = flip_flop_changes
         self.gateways: set[str] = {canonical_ip(ip) for ip in gateways}
         self._seen: OrderedDict[str, Observation] = OrderedDict()
+        self._first_seen: OrderedDict[str, float] = OrderedDict()
         # ip -> [(timestamp, mac), ...] for recent mapping changes, oldest first
         self._changes: OrderedDict[str, list[tuple[float, str]]] = OrderedDict()
 
@@ -427,15 +428,34 @@ class Tracker:
             if canonical.ip in self._seen:
                 continue
             self._seen[canonical.ip] = canonical
+            self._first_seen[canonical.ip] = timestamp
         self._prune()
 
     def export_baseline(self) -> "dict[str, str]":
         """Return the current learned IP/MAC map for persistence."""
         return {item.ip: item.mac for item in self._seen.values()}
 
+    def host_records(self) -> "list[dict[str, object]]":
+        """Return the tracked inventory with first/last seen and change counts."""
+        records = []
+        for item in self._seen.values():
+            first = self._first_seen.get(item.ip, item.timestamp)
+            records.append({
+                "ip": item.ip,
+                "mac": item.mac,
+                "interface": item.interface,
+                "first_seen": rfc3339(first),
+                "first_seen_epoch": first,
+                "last_seen": rfc3339(item.timestamp),
+                "last_seen_epoch": item.timestamp,
+                "recent_changes": len(self._changes.get(item.ip, [])),
+            })
+        return records
+
     def _prune(self) -> None:
         while len(self._seen) > self.max_entries:
-            self._seen.popitem(last=False)
+            oldest = self._seen.popitem(last=False)[0]
+            self._first_seen.pop(oldest, None)
 
     def observe(self, item: Observation) -> dict[str, object] | None:
         item = Observation(
@@ -446,6 +466,7 @@ class Tracker:
         previous = self._seen.get(item.ip)
         self._seen[item.ip] = item
         self._seen.move_to_end(item.ip)
+        self._first_seen.setdefault(item.ip, item.timestamp)
         self._prune()
         if previous is None:
             if self.report_new_hosts:
