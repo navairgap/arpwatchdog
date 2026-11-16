@@ -998,6 +998,37 @@ class MetricsServer:
             self._thread.join(timeout=5)
 
 
+class PeriodicReporter:
+    """Run a callback on an interval until stopped (used for live summaries)."""
+
+    def __init__(self, interval: float, action: "callable") -> None:
+        import threading
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
+                or not math.isfinite(interval) or interval <= 0:
+            raise ValueError("stats interval must be a positive finite number")
+        self.interval = float(interval)
+        self.action = action
+        self._threading = threading
+        self._event = threading.Event()
+        self._thread = None
+
+    def start(self) -> None:
+        def loop() -> None:
+            while not self._event.wait(self.interval):
+                try:
+                    self.action()
+                except Exception as exc:  # never kill the reporter thread
+                    print(f"arpwatchdog: stats interval: {exc}", file=sys.stderr)
+
+        self._thread = self._threading.Thread(target=loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+
 class StopFlag:
     """A simple cooperative stop request shared with signal handlers."""
 
@@ -1161,6 +1192,9 @@ def build_parser() -> "object":
     parser.add_argument("--metrics-serve", metavar="[HOST:]PORT",
                         help="serve metrics over HTTP on this address "
                              "(default host 127.0.0.1; only scrape from trusted networks)")
+    parser.add_argument("--stats-interval", type=float, default=0.0, metavar="SEC",
+                        help="print stats and refresh --metrics-file every SEC seconds "
+                             "during live capture")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1249,7 +1283,20 @@ def main(argv: "list[str] | None" = None) -> int:
                 signal.signal(sig, stop.request)
             except (OSError, ValueError):  # pragma: no cover - platform limits
                 pass
+
+        def report_periodically() -> None:
+            print(monitor.stats.line(), file=sys.stderr)
+            if options.metrics_file:
+                save_metrics(options.metrics_file, monitor.stats,
+                             len(tracker.export_baseline()))
+
+        reporter = None
+        if options.stats_interval > 0:
+            reporter = PeriodicReporter(options.stats_interval, report_periodically)
+            reporter.start()
         monitor.run_live(options.interface, stop)
+        if reporter is not None:
+            reporter.stop()
         print("arpwatchdog: stopped", file=sys.stderr)
     elif options.pcap:
         monitor.run_pcap(options.pcap, options.interface or None)

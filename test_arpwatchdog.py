@@ -29,6 +29,7 @@ from arpwatchdog import (
     observation_from_scapy_packet,
     PcapSource,
     parse_frame,
+    PeriodicReporter,
     render_metrics,
     save_baseline,
     save_metrics,
@@ -1184,6 +1185,34 @@ class MetricsServerTests(unittest.TestCase):
     def test_refuses_invalid_bind_address(self):
         with self.assertRaises(Exception):
             MetricsServer(lambda: "", host="256.256.256.256")
+
+
+class PeriodicReporterTests(unittest.TestCase):
+    def test_fires_on_interval_and_stops(self):
+        import time
+        calls = []
+        reporter = PeriodicReporter(0.05, lambda: calls.append(time.monotonic()))
+        reporter.start()
+        time.sleep(0.25)
+        reporter.stop()
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_stop_prevents_further_calls(self):
+        import time
+        calls = []
+        reporter = PeriodicReporter(0.05, lambda: calls.append(1))
+        reporter.start()
+        time.sleep(0.12)
+        reporter.stop()
+        count_at_stop = len(calls)
+        time.sleep(0.15)
+        self.assertEqual(len(calls), count_at_stop)
+
+    def test_rejects_bad_interval(self):
+        with self.assertRaises(ValueError):
+            PeriodicReporter(0, lambda: None)
+        with self.assertRaises(ValueError):
+            PeriodicReporter(float("nan"), lambda: None)
 
 
 if __name__ == "__main__":
