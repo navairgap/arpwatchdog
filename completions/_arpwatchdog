@@ -1,0 +1,39 @@
+#compdef arpwatchdog
+# zsh completion for arpwatchdog
+
+_arpwatchdog() {
+    _arguments -s \
+        '(-i --interface)'{-i,--interface}'[capture ARP live on this interface]:interface:( $(ls /sys/class/net) )' \
+        '(-r --replay)'{-r,--replay}'[replay JSONL records from file]:file:_files' \
+        '(-p --pcap)'{-p,--pcap}'[replay from saved pcap/pcapng capture]:file:_files' \
+        '(-f --baseline)'{-f,--baseline}'[load arp.dat-style baseline]:file:_files' \
+        '--state[load and save learned state]:file:_files' \
+        '--gateway[watch this gateway]:ip:' \
+        '--ignore[ignore events for this CIDR range]:cidr:' \
+        '--no-new-hosts[do not emit new_host events]' \
+        '--no-suppress[emit every event without deduplication]' \
+        '--suppress-window[alert deduplication window in seconds]:seconds:' \
+        '--flip-window[flip-flop detection window in seconds]:seconds:' \
+        '--flip-changes[MAC changes that flag a flip-flop]:count:' \
+        '--max-entries[maximum tracked IP addresses]:count:' \
+        '--format[alert output format]:format:(json text csv)' \
+        '--alert-file[also append alerts to file]:file:_files' \
+        '--alert-max-bytes[rotate alert file at this size]:bytes:' \
+        '--syslog[also send alerts to the system logger]' \
+        '--webhook[also POST JSON alerts to this URL]:url:' \
+        '--quiet[do not print alerts to stdout]' \
+        '--stats[print a run summary at exit]' \
+        '--metrics-file[write Prometheus metrics to file]:file:_files' \
+        '--metrics-serve[serve metrics over HTTP]:address:' \
+        '--stats-interval[periodic stats interval in seconds]:seconds:' \
+        '--fail-on[exit code policy]:policy:(none critical)' \
+        '--dry-run[process input but emit no alerts]' \
+        '--debug[log pipeline decisions to stderr]' \
+        '--config[read default options from TOML file]:file:_files -g "*.toml"' \
+        '--list[print the learned IP/MAC table]' \
+        '--export[export the learned table]:format:(json csv html md):file:_files' \
+        '(--help)-h[help]' \
+        '--version[print version]'
+}
+
+_arpwatchdog "$@"
