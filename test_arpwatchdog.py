@@ -1297,5 +1297,23 @@ class FailOnTests(unittest.TestCase):
         self.assertEqual(stats.critical, 1)
 
 
+class DryRunTests(unittest.TestCase):
+    def test_dry_run_counts_but_emits_nothing(self):
+        records = [
+            CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10"),
+            CliTests.record("eth0", 2, "02:00:00:00:00:02", "192.0.2.10"),
+        ]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, out, err = cli.run_cli(["--dry-run", "--stats"], records)
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "")
+            self.assertIn("new_host", err)
+            self.assertIn("mapping_changed", err)
+        finally:
+            cli._restore()
+
+
 if __name__ == "__main__":
     unittest.main()

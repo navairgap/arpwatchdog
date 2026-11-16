@@ -1249,6 +1249,9 @@ def build_parser() -> "object":
     parser.add_argument("--fail-on", choices=("none", "critical"), default="none",
                         help="exit with code 3 when a critical alert is emitted "
                              "(useful in CI pipelines)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="process input and count events but emit no alerts "
+                             "(stdout, files, syslog and webhooks stay silent)")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1297,14 +1300,16 @@ def main(argv: "list[str] | None" = None) -> int:
         suppressor = None if options.no_suppress else Suppressor(options.suppress_window)
         ip_filter = IpFilter(options.ignore)
         sinks: "list[callable]" = []
-        if not options.quiet:
+        if options.dry_run:
+            sinks = []  # counters still run; nothing is emitted anywhere
+        elif not options.quiet:
             sinks.append(make_sink(options.format))
-        if options.alert_file:
+        if options.alert_file and not options.dry_run:
             file_sink = FileSink(options.alert_file, options.format)
             sinks.append(file_sink)
-        if options.syslog:
+        if options.syslog and not options.dry_run:
             sinks.append(SyslogSink())
-        if options.webhook:
+        if options.webhook and not options.dry_run:
             sinks.append(WebhookSink(options.webhook))
         monitor = Monitor(
             tracker, suppressor=suppressor, ip_filter=ip_filter,
