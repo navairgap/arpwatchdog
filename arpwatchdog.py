@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import tomllib
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1186,6 +1186,107 @@ class PeriodicReporter:
             self._thread.join(timeout=5)
 
 
+def render_dashboard(
+    interface: str,
+    stats: Stats,
+    tracker: Tracker,
+    recent_events: Iterable[dict],
+    width: int,
+    height: int,
+    version: str = __version__,
+) -> list[tuple[str, str]]:
+    """Render the live dashboard as (text, severity) rows; no curses involved.
+
+    Each row is truncated to `width` and the output is capped at `height`
+    lines, so the curses wrapper can blit the result without layout logic.
+    """
+    lines: list[tuple[str, str]] = []
+
+    def add(text: str, severity: str = "") -> None:
+        if len(lines) < height:
+            lines.append((text[:width], severity))
+
+    alert_total = sum(stats.alerts.values())
+    add(f"arpwatchdog {version} — watching {interface}   (press q to quit)")
+    add(f"observations: {stats.arp_observations}   alerts: {alert_total}   "
+        f"critical: {stats.critical}   suppressed: {stats.suppressed}")
+    add(f"tracked hosts: {len(tracker.export_baseline())}")
+    gateways = ", ".join(sorted(tracker.gateways, key=ip_sort_key)) or "none"
+    add(f"watched gateways: {gateways}")
+    kinds = "   ".join(f"{kind}={count}" for kind, count in sorted(stats.alerts.items()))
+    add(f"alerts by kind: {kinds or 'none'}")
+    add("")
+    add("recent alerts:")
+    for event in reversed(recent_events):
+        mac = str(event.get("current_mac") or event.get("mac") or "?")
+        severity = str(event.get("severity", "info"))
+        add(f"  {event.get('observed_at', '')[:19]}  {event.get('event', ''):22} "
+            f"{severity:8} {event.get('ip', ''):15} {mac}", severity)
+    return lines
+
+
+class Dashboard:
+    """Curses dashboard for live capture; the rendering itself is pure."""
+
+    REFRESH_SECONDS = 0.25
+
+    def __init__(self, tracker: Tracker, stats: Stats, recent: deque) -> None:
+        self.tracker = tracker
+        self.stats = stats
+        self.recent = recent
+
+    def lines(self, interface: str, width: int, height: int) -> list[tuple[str, str]]:
+        return render_dashboard(
+            interface, self.stats, self.tracker, self.recent, width, height,
+        )
+
+    def run(self, interface: str, stop: StopFlag) -> None:
+        """Draw the dashboard until the user presses q or capture is stopped."""
+        import curses  # noqa: PLC0415 - optional dependency, live TUI only
+
+        severity_colors = {"critical": 1, "warning": 2, "info": 3}
+
+        def draw(stdscr: object) -> None:
+            curses.curs_set(0)
+            stdscr.nodelay(True)
+            colors = curses.has_colors()
+            if colors:
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(1, curses.COLOR_RED, -1)
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                curses.init_pair(3, curses.COLOR_GREEN, -1)
+            while not stop.stop:
+                if stdscr.getch() in (ord("q"), ord("Q")):
+                    stop.request()
+                    break
+                height, width = stdscr.getmaxyx()
+                stdscr.erase()
+                for row, (text, severity) in enumerate(self.lines(interface, width, height)):
+                    attribute = curses.color_pair(severity_colors.get(severity, 0)) if colors else 0
+                    try:
+                        stdscr.addstr(row, 0, text, attribute)
+                    except curses.error:
+                        pass  # writing the bottom-right cell raises; clipping is fine
+                stdscr.refresh()
+                time.sleep(self.REFRESH_SECONDS)
+
+        curses.wrapper(draw)
+
+
+def make_alert_recorder(sinks: list[Callable], recent: deque | None) -> Callable:
+    """Dispatch alerts to every sink, optionally keeping the newest ones."""
+    base = multi_sink(*sinks)
+    if recent is None:
+        return base
+
+    def sink(event: dict) -> None:
+        recent.append(event)
+        base(event)
+
+    return sink
+
+
 class StopFlag:
     """A simple cooperative stop request shared with signal handlers."""
 
@@ -1359,7 +1460,8 @@ CONFIG_KEYS = frozenset({
     "no-new-hosts", "no-dhcp-expire", "no-suppress", "suppress-window", "flip-window",
     "flip-changes", "max-entries", "format", "alert-file", "alert-max-bytes",
     "syslog", "webhook", "quiet", "stats", "metrics-file", "metrics-serve",
-    "stats-interval", "fail-on", "dry-run", "debug", "sd-notify", "list", "export",
+    "stats-interval", "fail-on", "dry-run", "debug", "sd-notify", "tui", "list",
+    "export",
 })
 CONFIG_ALIASES = {"gateways": "gateway"}
 
@@ -1450,6 +1552,9 @@ def build_parser() -> object:
     parser.add_argument("--sd-notify", action="store_true",
                         help="announce readiness to systemd via $NOTIFY_SOCKET and "
                              "keep its watchdog fed during live capture")
+    parser.add_argument("--tui", action="store_true",
+                        help="show a live terminal dashboard during capture "
+                             "(requires --interface; press q to quit)")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1466,6 +1571,8 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     chosen_modes = [name for name in ("interface", "pcap", "replay")
                     if getattr(options, name)]
+    if options.tui and not options.interface:
+        parser.error("--tui requires --interface")
     if len(chosen_modes) > 1:
         parser.error(f"choose one input mode; got --{chosen_modes[0].replace('_', '-')} "
                      f"and --{chosen_modes[1].replace('_', '-')}")
@@ -1516,9 +1623,11 @@ def main(argv: list[str] | None = None) -> int:
             sinks.append(SyslogSink())
         if options.webhook and not options.dry_run:
             sinks.append(WebhookSink(options.webhook))
+        recent_events: deque = deque(maxlen=20)
         monitor = Monitor(
             tracker, suppressor=suppressor, ip_filter=ip_filter,
-            sink=multi_sink(*sinks), stats=Stats(), debug=options.debug,
+            sink=make_alert_recorder(sinks, recent_events if options.tui else None),
+            stats=Stats(), debug=options.debug,
         )
     except ValueError as exc:
         print(f"arpwatchdog: {exc}", file=sys.stderr)
@@ -1566,7 +1675,21 @@ def main(argv: list[str] | None = None) -> int:
                           "the environment; not running under systemd?",
                           file=sys.stderr)
                 watchdog.start()
-            monitor.run_live(options.interface, stop)
+            if options.tui:
+                dashboard = Dashboard(tracker, monitor.stats, recent_events)
+                capture = threading.Thread(
+                    target=monitor.run_live,
+                    args=(options.interface, stop), daemon=True,
+                )
+                capture.start()
+                try:
+                    dashboard.run(options.interface, stop)
+                except KeyboardInterrupt:
+                    pass  # curses restores the terminal on the way out
+                stop.request()
+                capture.join(timeout=5.0)
+            else:
+                monitor.run_live(options.interface, stop)
             if watchdog is not None:
                 watchdog.stop()
             if reporter is not None:

@@ -43,6 +43,7 @@ from arpwatchdog import (
     SdWatchdog,
     Stats,
     StopFlag,
+    render_dashboard,
     rfc3339,
 )
 
@@ -1556,6 +1557,79 @@ class SdNotifyTests(unittest.TestCase):
         self.assertGreaterEqual(
             sum(1 for message in received if message == b"WATCHDOG=1"), 1)
         self.assertEqual(received[-1], b"STOPPING=1")
+
+
+class DashboardTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+
+    def render(self, stats=None, tracker=None, recent=(), width=80, height=24):
+        from collections import deque as _deque
+        tracker = tracker if tracker is not None else Tracker(report_new_hosts=False)
+        stats = stats if stats is not None else Stats()
+        return render_dashboard("eth0", stats, tracker, _deque(recent), width, height)
+
+    def recent_event(self, kind, ip, mac, severity, timestamp="2026-11-20T10:00:00.000Z"):
+        return {
+            "event": kind, "ip": ip, "current_mac": mac, "severity": severity,
+            "observed_at": timestamp,
+        }
+
+    def test_header_names_interface_and_quit_key(self):
+        rows = self.render()
+        self.assertIn("arpwatchdog", rows[0][0])
+        self.assertIn("eth0", rows[0][0])
+        self.assertIn("q", rows[0][0])
+
+    def test_counts_render_when_empty(self):
+        rows = self.render()
+        self.assertIn("observations: 0", rows[1][0])
+        self.assertIn("tracked hosts: 0", rows[2][0])
+        self.assertIn("watched gateways: none", rows[3][0])
+        self.assertIn("alerts by kind: none", rows[4][0])
+
+    def test_counts_render_alert_totals(self):
+        stats = Stats()
+        stats.arp_observations = 42
+        stats.count_alert("mapping_changed", "warning")
+        stats.count_alert("mapping_changed", "warning")
+        stats.count_alert("gateway_mac_changed", "critical")
+        rows = self.render(stats=stats)
+        self.assertIn("observations: 42", rows[1][0])
+        self.assertIn("critical: 1", rows[1][0])
+        self.assertIn("mapping_changed=2", rows[4][0])
+        self.assertIn("gateway_mac_changed=1", rows[4][0])
+
+    def test_gateways_render_sorted(self):
+        tracker = Tracker(report_new_hosts=False, gateways=["192.168.1.1", "fe80::21"])
+        rows = self.render(tracker=tracker)
+        self.assertIn("192.168.1.1, fe80::21", rows[3][0])
+
+    def test_recent_alerts_render_newest_first_with_severity(self):
+        recent = [
+            self.recent_event("mapping_changed", "192.0.2.10", self.MAC_A, "warning",
+                              "2026-11-20T09:00:00.000Z"),
+            self.recent_event("gateway_mac_changed", "192.168.1.1", self.MAC_B, "critical",
+                              "2026-11-20T10:00:00.000Z"),
+        ]
+        rows = self.render(recent=recent)
+        alert_rows = [text for text, _sev in rows if "gateway_mac_changed" in text
+                      or "mapping_changed" in text]
+        self.assertEqual(len(alert_rows), 2)
+        self.assertIn("gateway_mac_changed", alert_rows[0])
+        self.assertIn("mapping_changed", alert_rows[1])
+        self.assertIn("192.168.1.1", alert_rows[0])
+        self.assertEqual(rows[-1][1], "warning")  # oldest alert renders last
+
+    def test_rows_are_truncated_to_width(self):
+        recent = [self.recent_event("mapping_changed", "192.0.2.10", self.MAC_A, "warning")]
+        rows = self.render(recent=recent, width=20)
+        self.assertTrue(all(len(text) <= 20 for text, _sev in rows))
+
+    def test_height_limits_row_count(self):
+        recent = [self.recent_event("mapping_changed", "192.0.2.10", self.MAC_A, "warning")]
+        self.assertLessEqual(len(self.render(recent=recent, height=5)), 5)
+        self.assertEqual(len(self.render(recent=recent, height=0)), 0)
 
 
 class InventoryReportTests(unittest.TestCase):
