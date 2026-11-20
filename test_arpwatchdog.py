@@ -201,6 +201,64 @@ class FlipFlopTests(unittest.TestCase):
         self.assertEqual(flips[0]["flip_flop"]["changes"], 2)
 
 
+class DhcpExpiryTests(unittest.TestCase):
+    MAC_A = "02:00:00:00:00:01"
+    MAC_B = "02:00:00:00:00:02"
+    MAC_C = "02:00:00:00:00:03"
+
+    @staticmethod
+    def dhcp_ack(ip, mac, timestamp):
+        return Observation("eth0", timestamp, ip, mac, operation=0, kind="dhcp_ack")
+
+    def test_reassignment_replaces_mapping_changed(self):
+        tracker = Tracker(report_new_hosts=False)
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", self.MAC_A))
+        event = tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_B, 2))
+        self.assertEqual(event["event"], "dhcp_reassignment")
+        self.assertEqual(event["previous_mac"], self.MAC_A)
+        self.assertEqual(event["current_mac"], self.MAC_B)
+        self.assertEqual(severity_for(event), "info")
+        self.assertIn("reassigned this lease", event["assessment"])
+
+    def test_reassignment_expires_conflict_evidence(self):
+        tracker = Tracker(report_new_hosts=False)
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", self.MAC_A))
+        tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_B, 2))
+        event = tracker.observe(Observation("eth0", 3, "192.0.2.10", self.MAC_C))
+        self.assertEqual(event["event"], "mapping_changed")
+        self.assertIsNone(event["flip_flop"])
+        self.assertIsNone(event["ip_conflict"])
+
+    def test_reassignment_keeps_known_host_quiet_on_next_change(self):
+        # The retired MAC must not count toward a later flip-flop either.
+        tracker = Tracker(report_new_hosts=False, flip_flop_changes=3)
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", self.MAC_A))
+        tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_B, 2))
+        events = []
+        for ts, mac in ((3, self.MAC_C), (4, self.MAC_B)):
+            event = tracker.observe(Observation("eth0", ts, "192.0.2.10", mac))
+            if event:
+                events.append(event)
+        self.assertTrue(all(not event.get("flip_flop") for event in events))
+
+    def test_legacy_mode_acks_alert_like_any_other_change(self):
+        tracker = Tracker(report_new_hosts=False, dhcp_expires=False)
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", self.MAC_A))
+        event = tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_B, 2))
+        self.assertEqual(event["event"], "mapping_changed")
+
+    def test_same_mac_ack_refresh_is_quiet(self):
+        tracker = Tracker(report_new_hosts=False)
+        tracker.observe(Observation("eth0", 1, "192.0.2.10", self.MAC_A))
+        self.assertIsNone(tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_A, 2)))
+
+    def test_first_ack_still_announces_new_host(self):
+        tracker = Tracker(report_new_hosts=True)
+        event = tracker.observe(self.dhcp_ack("192.0.2.10", self.MAC_A, 1))
+        self.assertEqual(event["event"], "new_host")
+        self.assertEqual(event["packet_kind"], "dhcp_ack")
+
+
 class GatewayTests(unittest.TestCase):
     MAC_A = "02:00:00:00:00:01"
     MAC_B = "02:00:00:00:00:02"
@@ -519,6 +577,11 @@ class CliTests(unittest.TestCase):
         events = [json.loads(line) for line in out.strip().splitlines()]
         self.assertEqual([e["event"] for e in events], ["new_host", "mapping_changed"])
 
+    def test_no_dhcp_expire_flag_is_accepted(self):
+        records = [self.record("eth0", 1, self.MAC_A, "192.0.2.10")]
+        code, _out, err = self.run_cli(["--no-dhcp-expire"], records)
+        self.assertEqual(code, 0)
+
     def test_ignore_cidr_suppresses_events(self):
         records = [
             self.record("eth0", 1, self.MAC_A, "192.0.2.10"),
@@ -810,6 +873,17 @@ class ConfigTests(unittest.TestCase):
             event = json.loads(out.strip())
             self.assertEqual(code, 0)
             self.assertEqual(event["event"], "new_host")
+        finally:
+            cli._restore()
+
+    def test_no_dhcp_expire_key_is_accepted(self):
+        self.write('no-dhcp-expire = true\n')
+        records = [CliTests.record("eth0", 1, "02:00:00:00:00:01", "192.0.2.10")]
+        cli = CliTests()
+        cli.setUp()
+        try:
+            code, _out, _err = cli.run_cli(["--config", self.path], records)
+            self.assertEqual(code, 0)
         finally:
             cli._restore()
 

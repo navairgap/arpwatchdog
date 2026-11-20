@@ -604,6 +604,7 @@ class Tracker:
         flip_flop_window: float = 300.0,
         flip_flop_changes: int = 3,
         gateways: Iterable[str] = (),
+        dhcp_expires: bool = True,
     ) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
@@ -617,6 +618,7 @@ class Tracker:
         self.report_new_hosts = report_new_hosts
         self.flip_flop_window = float(flip_flop_window)
         self.flip_flop_changes = flip_flop_changes
+        self.dhcp_expires = dhcp_expires
         self.gateways: set[str] = {canonical_address(ip) for ip in gateways}
         self._seen: OrderedDict[str, Observation] = OrderedDict()
         self._first_seen: OrderedDict[str, float] = OrderedDict()
@@ -697,6 +699,28 @@ class Tracker:
             return None
         if previous.mac == item.mac:
             return None
+        if self.dhcp_expires and item.kind == "dhcp_ack":
+            # A DHCPACK is the server's authoritative reassignment of the lease:
+            # the old mapping is stale, not stolen, so retire it without leaving
+            # flip-flop or conflict evidence behind.
+            self._changes.pop(item.ip, None)
+            return make_event(
+                "dhcp_reassignment",
+                ip=item.ip,
+                previous_mac=previous.mac,
+                current_mac=item.mac,
+                vendor=vendor_for(item.mac),
+                previous_interface=previous.interface,
+                interface=item.interface,
+                server=item.target_ip,
+                first_seen=rfc3339(previous.timestamp),
+                first_seen_epoch=previous.timestamp,
+                observed_at=rfc3339(item.timestamp),
+                observed_at_epoch=item.timestamp,
+                assessment="the DHCP server reassigned this lease; the old mapping "
+                           "was expired instead of flagged, so no spoofing evidence "
+                           "is recorded",
+            )
         self._record_change(item)
         flip_flop = self._detect_flip_flop(item)
         conflict = self._detect_conflict(item)
@@ -1257,7 +1281,7 @@ def _print_event(event: dict) -> None:
 
 CONFIG_KEYS = frozenset({
     "interface", "replay", "pcap", "baseline", "state", "gateway", "ignore",
-    "no-new-hosts", "no-suppress", "suppress-window", "flip-window",
+    "no-new-hosts", "no-dhcp-expire", "no-suppress", "suppress-window", "flip-window",
     "flip-changes", "max-entries", "format", "alert-file", "alert-max-bytes",
     "syslog", "webhook", "quiet", "stats", "metrics-file", "metrics-serve",
     "stats-interval", "fail-on", "dry-run", "debug", "list", "export",
@@ -1303,6 +1327,10 @@ def build_parser() -> object:
                         help="ignore events for this CIDR range (repeatable)")
     parser.add_argument("--no-new-hosts", action="store_true",
                         help="do not emit new_host events")
+    parser.add_argument("--no-dhcp-expire", action="store_true",
+                        help="treat DHCP lease reassignments like any other mapping "
+                             "change (default: expire the old mapping and emit an "
+                             "informational dhcp_reassignment event)")
     parser.add_argument("--no-suppress", action="store_true",
                         help="emit every event without deduplication")
     parser.add_argument("--suppress-window", type=float, default=60.0, metavar="SEC",
@@ -1377,6 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
             report_new_hosts=not options.no_new_hosts,
             flip_flop_window=options.flip_window,
             flip_flop_changes=options.flip_changes,
+            dhcp_expires=not options.no_dhcp_expire,
         )
         if options.baseline:
             entries, problems = load_baseline(options.baseline)
