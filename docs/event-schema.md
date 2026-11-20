@@ -42,6 +42,8 @@ A MAC change is an observation, not a verdict. Detection output should include t
 
 A learned IP-to-MAC mapping should have an explicit observation window and last-seen timestamp. Expired entries should become unknown rather than remain trusted indefinitely. A new mapping should be compared against a stable, recently observed baseline; do not alert on a single packet during startup without enough context to distinguish an incomplete learning period from a change. Keep the baseline local and make any manual trust override explicit and auditable.
 
+DHCP ACKs are authoritative lease confirmations. When a server reassigns an address to a different MAC, the previous mapping is stale by authority: expire it (including any flip-flop or conflict evidence it accumulated) and emit an informational `dhcp_reassignment` event instead of `mapping_changed`. `--no-dhcp-expire` restores treating DHCP-driven changes like any other.
+
 ## Tests
 
 Use synthetic packet fixtures to cover truncated headers, invalid address lengths, duplicate observations, MAC normalization, and gateway changes. Unit tests must not require root privileges or a live interface.

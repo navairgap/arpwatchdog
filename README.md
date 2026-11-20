@@ -36,6 +36,7 @@ before, and emits an alert the moment a binding shifts.
 | `new_host` | info | An address was claimed for the first time. Expected at startup. |
 | `mapping_changed` | warning | An IP now claims a different MAC. Investigate. |
 | `gateway_mac_changed` | critical | Your watched gateway changed hardware address — the classic ARP-poisoning signature. |
+| `dhcp_reassignment` | info | The DHCP server reassigned a lease to a different device. Not spoofing — handled by expiring the old mapping. |
 | flip-flop evidence | critical | One IP switched between MACs repeatedly inside the detection window. |
 | `ip_conflict` | evidence | Two different MACs claimed the same IP inside the window. |
 
@@ -130,6 +131,7 @@ JSONL record shape:
 | `--baseline FILE` | — | arpwatch `arp.dat` file of known `mac ip` pairs. |
 | `--state FILE` | — | Persist learned mappings across restarts (atomic JSON). |
 | `--no-new-hosts` | off | Silence `new_host` events. |
+| `--no-dhcp-expire` | off | Alert on DHCP lease reassignments like any other mapping change (default: expire the old mapping, emit informational `dhcp_reassignment`). |
 | `--dry-run` | off | Count events, emit nothing. |
 | `--debug` | off | Log pipeline decisions to stderr. |
 | `--config FILE.toml` | — | Default options from TOML; flags override. |
@@ -155,6 +157,8 @@ version and [deploy/](deploy/) for a hardened systemd unit.
 | `--stats` | Run summary to stderr. |
 | `--metrics-file PATH` | Prometheus snapshot, written atomically. |
 | `--metrics-serve [HOST:]PORT` | Prometheus HTTP endpoint (opt-in, binds 127.0.0.1). |
+| `--tui` | Live terminal dashboard during capture (requires `--interface`; press q to quit). |
+| `--sd-notify` | Announce readiness to systemd (`READY=1`/`STOPPING=1`) and keep its watchdog fed. |
 
 ### Exit codes
 

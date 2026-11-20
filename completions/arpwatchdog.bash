@@ -2,11 +2,11 @@
 _arpwatchdog() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local opts="-i --interface -r --replay -p --pcap -f --baseline --state
-        --gateway --ignore --no-new-hosts --no-suppress --suppress-window
-        --flip-window --flip-changes --max-entries --format --alert-file
-        --alert-max-bytes --syslog --webhook --quiet --stats --metrics-file
-        --metrics-serve --stats-interval --fail-on --dry-run --debug
-        --config --list --export --help --version"
+        --gateway --ignore --no-new-hosts --no-dhcp-expire --no-suppress
+        --suppress-window --flip-window --flip-changes --max-entries --format
+        --alert-file --alert-max-bytes --syslog --webhook --quiet --stats
+        --metrics-file --metrics-serve --stats-interval --fail-on --dry-run
+        --debug --sd-notify --tui --config --list --export --help --version"
     COMPREPLY=()
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )

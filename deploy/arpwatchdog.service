@@ -5,7 +5,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify pairs with --sd-notify: startup completes on READY=1 and
+# WatchdogSec restarts the unit when capture stops making progress.
+Type=notify
+WatchdogSec=30
 # DynamicUser keeps the process unprivileged; AmbientColors=cap_net_raw is
 # the only capability needed for passive capture.
 DynamicUser=yes
@@ -23,7 +26,8 @@ ExecStart=/usr/bin/env arpwatchdog \
     --baseline /var/lib/arpwatchdog/arp.dat \
     --syslog \
     --quiet \
-    --stats
+    --stats \
+    --sd-notify
 Restart=on-failure
 RestartSec=5
 

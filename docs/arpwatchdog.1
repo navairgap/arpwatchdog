@@ -1,4 +1,4 @@
-.TH ARPWATCHDOG 1 "2026-11-16" "arpwatchdog 1.1.0" "User Commands"
+.TH ARPWATCHDOG 1 "2026-11-20" "arpwatchdog 1.5.0" "User Commands"
 .SH NAME
 arpwatchdog \- passive ARP spoofing detector for local networks
 .SH SYNOPSIS
@@ -22,8 +22,9 @@ legitimate changes.
 .SH MODES
 .TP
 .BR \-i ", " \-\-interface " " \fIIFACE\fR
-Capture ARP/ND/DHCP live on \fIIFACE\fR (requires scapy). The default gateway
-is auto\-detected from the routing table unless \fB\-\-gateway\fR is given.
+Capture ARP/ND/DHCP live on \fIIFACE\fR (requires scapy). The IPv4 and IPv6
+default gateways are auto\-detected from the routing tables unless
+\fB\-\-gateway\fR is given.
 .TP
 .BR \-r ", " \-\-replay " " \fIFILE\fR
 Replay JSONL records
@@ -52,6 +53,11 @@ An IP now claims a different MAC (warning); carries
 .TP
 .B gateway_mac_changed
 A watched gateway MAC moved (critical).
+.TP
+.B dhcp_reassignment
+The DHCP server reassigned a lease to a different MAC (info); the old
+mapping is expired rather than flagged, and no flip\-flop or conflict
+evidence is recorded.
 .SH ALERTING
 .TP
 .BR \-\-format " " \fIjson|text|csv\fR
@@ -96,6 +102,20 @@ Default options from TOML; CLI flags override.
 .TP
 .B \-\-dry\-run
 Count events, emit nothing. \fB\-\-debug\fR logs pipeline decisions.
+.TP
+.B \-\-no\-dhcp\-expire
+Treat DHCP lease reassignments like any other mapping change instead of
+expiring the old mapping.
+.SH LIVE OPERATION
+.TP
+.B \-\-tui
+Render a live terminal dashboard during capture (requires
+\fB\-\-interface\fR); press q to quit.
+.TP
+.B \-\-sd\-notify
+Announce readiness to systemd via \fB$NOTIFY_SOCKET\fR, keep its watchdog
+fed at half of \fB$WATCHDOG_USEC\fR, and send \fBSTOPPING=1\fR on shutdown.
+Sends are best\-effort and never fatal.
 .SH EXIT STATUS
 .TP
 .B 0
