@@ -112,6 +112,41 @@ def detect_default_gateways(path: str = "/proc/net/route") -> list[str]:
     return gateways
 
 
+def detect_ipv6_gateways(path: str = "/proc/net/ipv6_route") -> list[str]:
+    """Read the Linux IPv6 routing table and return the default gateway addresses.
+
+    The default route is the all-zero destination with prefix length zero; its
+    next hop is the gateway. Directly connected defaults (a `::` next hop) and
+    unreadable lines are skipped. Addresses are deduplicated in file order.
+    """
+    try:
+        with open(path, "r", encoding="ascii") as handle:
+            rows = handle.readlines()
+    except OSError:
+        return []
+    gateways: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 6:
+            continue
+        destination, prefix_length, _, _, next_hop = fields[:5]
+        try:
+            if len(destination) != 32 or int(destination, 16) != 0:
+                continue
+            if int(prefix_length, 16) != 0:
+                continue
+            if len(next_hop) != 32 or int(next_hop, 16) == 0:
+                continue
+            address = str(ipaddress.IPv6Address(int(next_hop, 16)))
+        except ValueError:
+            continue
+        if address not in seen:
+            seen.add(address)
+            gateways.append(address)
+    return gateways
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
     interface: str
@@ -1356,7 +1391,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"arpwatchdog: state: {problem}", file=sys.stderr)
         gateways = set(options.gateway) | set(state_gateways)
         if not gateways and options.interface:
-            gateways = set(detect_default_gateways())
+            gateways = set(detect_default_gateways()) | set(detect_ipv6_gateways())
         if gateways:
             tracker.set_gateways(gateways)
         suppressor = None if options.no_suppress else Suppressor(options.suppress_window)

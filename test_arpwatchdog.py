@@ -21,6 +21,7 @@ from arpwatchdog import (
     canonical_ip,
     canonical_mac,
     detect_default_gateways,
+    detect_ipv6_gateways,
     format_event_csv,
     format_event_text,
     load_baseline,
@@ -241,6 +242,68 @@ class GatewayTests(unittest.TestCase):
 
     def test_detect_default_gateways_missing_file_is_empty(self):
         self.assertEqual(detect_default_gateways("/nonexistent/route"), [])
+
+    def test_detect_ipv6_gateways_parses_proc_ipv6_route(self):
+        import tempfile
+        import os
+        rows = (
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+            "fe800000000000000000000000000021 00000100 00000001 00000000 00200001 eth0\n"
+            "20010db8000000000000000000000000 40 00000000000000000000000000000000 00 "
+            "00000000000000000000000000000000 00000100 00000001 00000000 00200000 eth0\n"
+            "fe800000000000000000000000000000 80 00000000000000000000000000000000 00 "
+            "00000000000000000000000000000000 00000000 00000000 00000000 00000000 eth0\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".route6", delete=False) as handle:
+            handle.write(rows)
+            path = handle.name
+        try:
+            self.assertEqual(detect_ipv6_gateways(path), ["fe80::21"])
+        finally:
+            os.unlink(path)
+
+    def test_detect_ipv6_gateways_keeps_multiple_distinct_gateways(self):
+        import tempfile
+        import os
+        rows = (
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+            "fe800000000000000000000000000021 00000100 00000001 00000000 00200001 eth0\n"
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+            "fe800000000000000000000000000022 00000100 00000001 00000000 00200001 eth1\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".route6", delete=False) as handle:
+            handle.write(rows)
+            path = handle.name
+        try:
+            self.assertEqual(detect_ipv6_gateways(path), ["fe80::21", "fe80::22"])
+        finally:
+            os.unlink(path)
+
+    def test_detect_ipv6_gateways_skips_direct_and_malformed_rows(self):
+        import tempfile
+        import os
+        rows = (
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 "
+            "00000000000000000000000000000000 00000100 00000001 00000000 00200001 eth0\n"
+            "nonsense line with too few fields\n"
+            "00000000000000000000000000000000 zz 00000000000000000000000000000000 00 "
+            "fe800000000000000000000000000021 00000100 00000001 00000000 00200001 eth0\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".route6", delete=False) as handle:
+            handle.write(rows)
+            path = handle.name
+        try:
+            self.assertEqual(detect_ipv6_gateways(path), [])
+        finally:
+            os.unlink(path)
+
+    def test_detect_ipv6_gateways_missing_file_is_empty(self):
+        self.assertEqual(detect_ipv6_gateways("/nonexistent/ipv6_route"), [])
+
+    def test_ipv6_gateways_are_watched_as_gateways(self):
+        tracker = Tracker(report_new_hosts=True, gateways=["fe80::21"])
+        event = tracker.observe(Observation("eth0", 1, "fe80::21", self.MAC_A))
+        self.assertTrue(event["gateway"])
 
 
 class SuppressorTests(unittest.TestCase):
