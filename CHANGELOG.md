@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.5.0 — 2026-11-20
+
+### Added
+- IPv6 default-gateway auto-detection from `/proc/net/ipv6_route`: live mode
+  now watches IPv6 gateways too, so ND-driven gateway MAC changes raise the
+  dedicated `gateway_mac_changed` event.
+- DHCP-aware baseline expiry: a DHCPACK reassigning a lease to a different
+  MAC expires the old mapping (including its flip-flop/conflict evidence)
+  and emits an informational `dhcp_reassignment` event instead of
+  `mapping_changed`. Use `--no-dhcp-expire` for the legacy behavior.
+- `--sd-notify`: systemd readiness (`READY=1`), watchdog petting at half of
+  `$WATCHDOG_USEC`, and `STOPPING=1` on shutdown; sends are best-effort.
+  The hardened unit in `deploy/` is now `Type=notify` with `WatchdogSec=30`.
+- `--tui`: a live terminal dashboard during capture (stats, watched
+  gateways, alerts by kind, newest alerts severity-colored); press q to
+  quit. The row renderer is pure and unit-tested without a terminal.
+
+### Docs
+- README tables, the man page, shell completions, and the event-schema
+  baseline-lifecycle note cover the new events and flags.
+
 ## 1.1.0 — 2026-11-16
 
 ### Added

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCHEMA_VERSION = 1
-__version__ = "1.1.0"
+__version__ = "1.5.0"
 
 
 def canonical_mac(mac: str) -> str:
