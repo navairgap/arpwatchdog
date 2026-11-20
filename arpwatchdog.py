@@ -15,6 +15,7 @@ import json
 import math
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -1195,6 +1196,80 @@ class StopFlag:
         self.stop = True
 
 
+def sd_notify(message: str, socket_path: str | None = None) -> bool:
+    """Send one sd_notify(3) message; returns False when systemd is unavailable.
+
+    The socket path comes from `$NOTIFY_SOCKET` unless given explicitly. A
+    leading `@` denotes a socket in the abstract namespace. Failures are
+    reported as a False return, never raised: a monitoring integration must
+    not take the capture down.
+    """
+    path = socket_path if socket_path is not None else os.environ.get("NOTIFY_SOCKET")
+    if not path or not message:
+        return False
+    address = "\0" + path[1:] if path.startswith("@") else path
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(address)
+            sock.sendall(message.encode("utf-8"))
+    except OSError:
+        return False
+    return True
+
+
+class SdWatchdog:
+    """Announce readiness to systemd and keep its watchdog fed during capture."""
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        source = os.environ if env is None else env
+        self.socket_path = source.get("NOTIFY_SOCKET", "")
+        self.interval = 0.0
+        raw = source.get("WATCHDOG_USEC", "")
+        if raw:
+            try:
+                seconds = int(raw) / 1_000_000
+            except ValueError:
+                seconds = 0.0
+            if seconds > 0:
+                self.interval = seconds / 2.0  # pet at half the deadline
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def available(self) -> bool:
+        return bool(self.socket_path)
+
+    def send(self, message: str) -> bool:
+        return sd_notify(message, self.socket_path)
+
+    def start(self) -> None:
+        """Send READY=1 and, when a watchdog deadline is set, start petting it."""
+        if not self.available:
+            return
+        self.send("READY=1")
+        if self.interval <= 0:
+            return
+
+        def loop() -> None:
+            while not self._stop.wait(self.interval):
+                self.send("WATCHDOG=1")
+
+        self._thread = threading.Thread(
+            target=loop, name="arpwatchdog-sd-watchdog", daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Send STOPPING=1 and halt the petting loop."""
+        if not self.available:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval + 1.0)
+            self._thread = None
+        self.send("STOPPING=1")
+
+
 class Monitor:
     """Wires a packet source into detections, filters, suppression and output."""
 
@@ -1284,7 +1359,7 @@ CONFIG_KEYS = frozenset({
     "no-new-hosts", "no-dhcp-expire", "no-suppress", "suppress-window", "flip-window",
     "flip-changes", "max-entries", "format", "alert-file", "alert-max-bytes",
     "syslog", "webhook", "quiet", "stats", "metrics-file", "metrics-serve",
-    "stats-interval", "fail-on", "dry-run", "debug", "list", "export",
+    "stats-interval", "fail-on", "dry-run", "debug", "sd-notify", "list", "export",
 })
 CONFIG_ALIASES = {"gateways": "gateway"}
 
@@ -1372,6 +1447,9 @@ def build_parser() -> object:
                              "(stdout, files, syslog and webhooks stay silent)")
     parser.add_argument("--debug", action="store_true",
                         help="log pipeline decisions to stderr")
+    parser.add_argument("--sd-notify", action="store_true",
+                        help="announce readiness to systemd via $NOTIFY_SOCKET and "
+                             "keep its watchdog fed during live capture")
     parser.add_argument("--config", metavar="FILE.toml",
                         help="read default options from a TOML file; "
                              "command-line flags override it")
@@ -1480,7 +1558,17 @@ def main(argv: list[str] | None = None) -> int:
             if options.stats_interval > 0:
                 reporter = PeriodicReporter(options.stats_interval, report_periodically)
                 reporter.start()
+            watchdog = None
+            if options.sd_notify:
+                watchdog = SdWatchdog()
+                if not watchdog.available:
+                    print("arpwatchdog: --sd-notify set but NOTIFY_SOCKET is not in "
+                          "the environment; not running under systemd?",
+                          file=sys.stderr)
+                watchdog.start()
             monitor.run_live(options.interface, stop)
+            if watchdog is not None:
+                watchdog.stop()
             if reporter is not None:
                 reporter.stop()
             print("arpwatchdog: stopped", file=sys.stderr)

@@ -39,6 +39,8 @@ from arpwatchdog import (
     save_metrics,
     severity_for,
     save_state,
+    sd_notify,
+    SdWatchdog,
     Stats,
     StopFlag,
     rfc3339,
@@ -580,6 +582,11 @@ class CliTests(unittest.TestCase):
     def test_no_dhcp_expire_flag_is_accepted(self):
         records = [self.record("eth0", 1, self.MAC_A, "192.0.2.10")]
         code, _out, err = self.run_cli(["--no-dhcp-expire"], records)
+        self.assertEqual(code, 0)
+
+    def test_sd_notify_flag_is_accepted(self):
+        records = [self.record("eth0", 1, self.MAC_A, "192.0.2.10")]
+        code, _out, err = self.run_cli(["--sd-notify"], records)
         self.assertEqual(code, 0)
 
     def test_ignore_cidr_suppresses_events(self):
@@ -1457,6 +1464,98 @@ class PeriodicReporterTests(unittest.TestCase):
             PeriodicReporter(0, lambda: None)
         with self.assertRaises(ValueError):
             PeriodicReporter(float("nan"), lambda: None)
+
+
+class SdNotifyTests(unittest.TestCase):
+    def datagram_server(self, address):
+        import socket as _socket
+        import threading
+        received = []
+        server = _socket.socket(_socket.AF_UNIX, _socket.SOCK_DGRAM)
+        server.bind(address)
+        server.settimeout(0.05)
+        done = threading.Event()
+
+        def loop():
+            while not done.is_set():
+                try:
+                    received.append(server.recv(512))
+                except _socket.timeout:
+                    continue
+                except OSError:
+                    break
+            server.close()
+
+        worker = threading.Thread(target=loop, daemon=True)
+        worker.start()
+        self.addCleanup(done.set)
+        self.addCleanup(worker.join, timeout=2.0)
+        return received
+
+    def wait_for(self, received, predicate=None, timeout=1.0):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if received and (predicate is None or predicate(received)):
+                return True
+            time.sleep(0.01)
+        return False
+
+    def temp_socket_path(self):
+        import os
+        import shutil
+        import tempfile
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        return os.path.join(directory, "notify.sock")
+
+    def test_without_socket_returns_false(self):
+        self.assertFalse(sd_notify("READY=1", ""))
+        self.assertFalse(sd_notify("", "/tmp/unused.sock"))
+
+    def test_sends_message_to_unix_datagram_socket(self):
+        path = self.temp_socket_path()
+        received = self.datagram_server(path)
+        self.assertTrue(sd_notify("READY=1", path))
+        self.assertTrue(self.wait_for(received))
+        self.assertEqual(received, [b"READY=1"])
+
+    def test_supports_abstract_namespace_socket(self):
+        received = self.datagram_server("\0arpwatchdog-test-socket")
+        self.assertTrue(sd_notify("READY=1", "@arpwatchdog-test-socket"))
+        self.assertTrue(self.wait_for(received))
+        self.assertEqual(received, [b"READY=1"])
+
+    def test_missing_socket_never_raises(self):
+        self.assertFalse(sd_notify("READY=1", "/nonexistent/sd.sock"))
+
+    def test_watchdog_without_socket_is_inert(self):
+        watchdog = SdWatchdog(env={})
+        self.assertFalse(watchdog.available)
+        self.assertEqual(watchdog.interval, 0.0)
+        watchdog.start()
+        watchdog.stop()
+        self.assertFalse(watchdog.send("READY=1"))
+
+    def test_watchdog_ignores_malformed_usec(self):
+        watchdog = SdWatchdog(env={"NOTIFY_SOCKET": "/tmp/unused.sock",
+                                   "WATCHDOG_USEC": "soon"})
+        self.assertEqual(watchdog.interval, 0.0)
+
+    def test_watchdog_announces_and_pets(self):
+        import time
+        path = self.temp_socket_path()
+        received = self.datagram_server(path)
+        watchdog = SdWatchdog(env={"NOTIFY_SOCKET": path, "WATCHDOG_USEC": "100000"})
+        watchdog.start()
+        time.sleep(0.25)
+        watchdog.stop()
+        self.assertTrue(self.wait_for(
+            received, lambda got: got and got[-1] == b"STOPPING=1"))
+        self.assertEqual(received[0], b"READY=1")
+        self.assertGreaterEqual(
+            sum(1 for message in received if message == b"WATCHDOG=1"), 1)
+        self.assertEqual(received[-1], b"STOPPING=1")
 
 
 class InventoryReportTests(unittest.TestCase):
